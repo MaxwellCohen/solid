@@ -33,11 +33,14 @@ import {
   createOptimisticStore,
   isPending,
   latest,
+  createDeferred,
+  from,
   refresh,
   affects,
   untrack,
   flush,
   onSettled,
+  onFlush,
   createContext,
   useContext,
   children,
@@ -111,6 +114,17 @@ createEffect(() => fetchData(id()), {
   error: (err, cleanup) => console.error(err)
 });
 
+// Effects never compare: apply (and the previous cleanup) runs every time
+// compute re-runs, even if it returned an equal value. To skip unchanged
+// values, read a memo in compute; its `equals` (default ===) stops the re-run.
+const active = createMemo(() => status() === "active");
+createEffect(
+  () => active(),
+  isActive => {
+    /* runs only when `active` flips */
+  }
+);
+
 // Run on next change only (skip initial)
 createEffect(
   () => count(),
@@ -127,7 +141,19 @@ onSettled(() => {
 });
 ```
 
-`onSettled` works in component bodies (after first reactive settle) **and** in event handlers (defer work until the triggered transition settles). For component-level setup-and-teardown, **use `onSettled` with a returned cleanup, not `onCleanup` directly** — `onCleanup` is reserved for reactive cleanup inside computations (see Advanced).
+`onSettled` works in component bodies (after first reactive settle) **and** in event handlers (defer work until the triggered transition settles).
+
+```ts
+// Keep a write out of another update's hold: runs once right after the
+// pending flush, never waits on async. For event handlers and effect
+// callbacks (dev warns ON_FLUSH_IN_OWNED_SCOPE in a body or computation).
+const select = (id: string) => {
+  onFlush(() => setOpen(false)); // closes now even if onSelect navigates
+  props.onSelect?.(id);
+};
+```
+
+For component-level setup-and-teardown, **use `onSettled` with a returned cleanup, not `onCleanup` directly** — `onCleanup` is reserved for reactive cleanup inside computations (see Advanced).
 
 ---
 
@@ -224,6 +250,21 @@ const user = createMemo(() => fetchUser(id()));
 
 // Peek at the in-flight value during a transition
 latest(id);
+
+// A memo that may lag but never leads (React's useDeferredValue): after its
+// first answer, a refetch keeps the last value on screen instead of holding
+// the change; isPending(() => rows()) reports the refetch.
+const rows = createDeferred(() => fetchRows(period()));
+
+// External push source -> memo: from() takes a subscribe fn
+// ((next, error, complete) => unsubscribe), an Observable (RxJS, Symbol.observable)
+// or an AsyncIterable (streamed as is). A subscription keeps the latest value;
+// a re-run or disposal closes the source at once. Transform in a downstream
+// memo, not in a for-await body; if you must for-await a stream inside an
+// async compute, wrap it in from() so a re-run stops it. SSR: a subscription
+// renders its first value, then the client resubscribes after hydration.
+const price = createMemo(() => from(ticker(symbol())));
+const label = createMemo(() => format(price()));
 
 // Force recompute of a derived read after a server write.
 // Action: call from handlers/effects/actions, not pure reads.
@@ -349,9 +390,15 @@ at the top of the callback freezes at the initial value (dev warns
 
 ## Context, components, lazy
 
-Context is for state scoped to a subtree of the component tree. **If you
-want truly app-wide state, don't use Context — a module-scope signal/store
-_is_ a global.** That's why the default-less form requires a Provider.
+Context is for state that belongs to a subtree, which includes app-wide
+state in an app that renders on the server: a value created inside a
+component is created once per request, and the Provider owns and disposes
+it. **Module scope is shared by every request in the same process, so
+reserve it for constants** (and the `createContext` call itself). A
+client-only app can get away with a module-scope store, but it becomes
+shared server state the day SSR is turned on, so creating state in a
+Provider is the portable choice. That's why the default-less form requires
+a Provider.
 
 ```tsx
 // Default-less — the canonical form. No Provider → ContextNotFoundError.
@@ -384,6 +431,11 @@ function Page() {
   return <div class={theme}>...</div>;
 }
 ```
+
+`undefined` means "not provided": `createContext<T | undefined>(undefined)`
+is still default-less, and `<Ctx value={undefined}>` counts as no Provider —
+both throw `ContextNotFoundError`. For an optional context use `null`:
+`createContext<T | null>(null)` (and a Provider may pass `null`).
 
 Don't write a `useTodos`-style wrapper that re-throws on missing Provider —
 the default-less form already throws, and `useContext` is typed `T` (no
@@ -435,6 +487,8 @@ hydrate(() => <App />, document.getElementById("root")!);
 <button ref={[autofocus, tooltip({ content: "Save" })]} />
 ```
 
+A ref runs before the element is attached: `el.isConnected` is `false`, and unless its template contains a custom element, `el.ownerDocument.defaultView` is `null`. Use the global `window`/`document`, or do layout-dependent work in `onSettled`.
+
 Two-phase directive (recommended):
 
 ```ts
@@ -460,7 +514,7 @@ function titleDirective(source) {
 <some-element enabled="true" />     // when platform requires the string
 ```
 
-Lowercase HTML attribute names. No `attr:` / `bool:` / `on:` / `oncapture:` namespaces. Event handlers stay camelCase (`onClick`).
+Lowercase HTML attribute names. No `attr:` / `bool:` / `on:` / `oncapture:` namespaces (or `use:` / `classList`): on native elements they are compile errors. Event handlers stay camelCase (`onClick`).
 
 For native listener options, use a ref callback:
 
@@ -469,6 +523,35 @@ const on = (type, handler, options) => el => el.addEventListener(type, handler, 
 
 <button ref={on("click", handleClick, { capture: true })} />;
 ```
+
+### Form inputs
+
+`value={x()}` / `checked={x()}` write the DOM property each time the binding re-runs, not by comparing with the DOM. Typing is not reverted when the signal doesn't change, and a re-run overwrites uncommitted text.
+
+```jsx
+// Editable field: draft signal from onInput, commit on change/submit
+const [draft, setDraft] = createSignal(props.name);
+<input
+  value={draft()}
+  onInput={e => setDraft(e.currentTarget.value)}
+  onChange={() => props.onCommit(draft())}
+/>;
+
+// Rejecting/transforming input: write the result back yourself
+<input
+  value={digits()}
+  onInput={e => {
+    const next = e.currentTarget.value.replace(/\D/g, "");
+    e.currentTarget.value = next; // setDigits(next) alone won't revert an equal value
+    setDigits(next);
+  }}
+/>;
+
+// Uncontrolled: no reactive value; initial state + read on submit
+<input name="title" defaultValue={initialTitle} />;
+```
+
+Don't bind `value` to a committed value while the typed text lives only in the DOM: a change to any other dynamic attribute in the same template re-runs the binding (stateful props share the template's grouped effect), and so does a spread re-evaluating any prop. Dev warns `UNCOMMITTED_INPUT_OVERWRITTEN` when that write erases uncommitted input.
 
 ### Conditional classes — always use the array/object form
 
@@ -503,6 +586,8 @@ return <li class={cls} />;
 import { renderToString, renderToStream, isServer, isDev } from "@solidjs/web";
 ```
 
+Hydration adopts each async read the server answered (value or error) and never asks again; a hydrated `<Errored>` keeps the server's fallback until an input changes or `reset()`. Adopted computes still run once to track reads, with the global `Promise` and `fetch` faked (never settle): don't cache promises or `import()`s created in a compute.
+
 `Portal` throws on the server. `Reveal` `order="together"` and `collapsed` require streaming (`renderToStream` — awaiting it yields the fully settled HTML string).
 
 ---
@@ -529,6 +614,10 @@ Reach for these only when the named situation applies. **If you're not sure, you
 // on disposal. For component-level setup-and-teardown, use onSettled and
 // return a cleanup; onCleanup is for library/primitive internals where the
 // cleanup is tied to a reactive run, not a component lifecycle.
+// Timing: a run that never committed cleans up when superseded (so an
+// AbortController aborted here, registered before the first await, cancels an
+// unfinished fetch); the run on screen stays live until its replacement lands.
+// Never await that cleanup inside the transition that replaces it (deadlock).
 onCleanup(() => disposeReactiveResource());
 
 // Deep tracking — only when an effect needs to react to *any* nested store change.
@@ -587,8 +676,10 @@ const v = await resolve(() => user());
 // Throw to signal "not ready" through the reactive graph (library authors).
 throw new NotReadyError();
 
-// 1.x-style path setter compat. Use only when migrating; draft-first is canonical.
-setStore(storePath("user", "address", "city", "Paris"));
+// 1.x path setters (setStore("user", "address", "city", "Paris")) become draft writes.
+setStore(s => {
+  s.user.address.city = "Paris";
+});
 ```
 
 ---
@@ -633,7 +724,7 @@ If your training data is 1.x, these are the corrections. **Read this before gene
 | `onError` / `catchError`           | `<Errored>` or effect `error` option                                |
 | `produce`                          | Default — store setters are draft-first                             |
 | `createMutable` / `modifyMutable`  | `createStore` with draft setters                                    |
-| `from` / `observable`              | Async iterables in computations / `createEffect` to push out        |
+| `observable`                       | `createEffect` to push out; `from`: `createMemo(() => from(src))`   |
 | `Index`                            | `<For keyed={false}>`                                               |
 | `indexArray`                       | `mapArray` (handles non-keyed too)                                  |
 | `use:foo={x}` directives           | `ref={foo(x)}` (or array `ref={[a, b(x)]}`)                         |
@@ -670,5 +761,5 @@ If your training data is 1.x, these are the corrections. **Read this before gene
 
 ## See also
 
-- [`MIGRATION.md`](https://github.com/solidjs/solid/blob/main/documentation/solid-2.0/MIGRATION.md) — full migration guide.
-- [Solid 2.0 RFCs](https://github.com/solidjs/solid/tree/main/documentation/solid-2.0) — deep-dive design docs by subsystem.
+- [`MIGRATION.md`](https://github.com/solidjs/solid/blob/next/documentation/solid-2.0/MIGRATION.md) — full migration guide.
+- [Solid 2.0 RFCs](https://github.com/solidjs/solid/tree/next/documentation/solid-2.0) — deep-dive design docs by subsystem.

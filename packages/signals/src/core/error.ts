@@ -30,7 +30,9 @@ export class NotReadyError extends Error {
    * construction.
    */
   declare _markVisual?: boolean;
-  source: any;
+  // `declare`: assigned in the constructor; a class field would only add
+  // bytes (an extra define before the assignment).
+  declare source: any;
   constructor(source: any) {
     // Control-flow throw: it happens on every read of a pending source, so in
     // production skip V8's eager stack capture (proportional to stack depth —
@@ -47,13 +49,16 @@ export class NotReadyError extends Error {
 }
 
 export class StatusError extends Error {
-  constructor(
-    public source: any,
-    original: any
-  ) {
-    super(original instanceof Error ? original.message : String(original), {
-      cause: original
-    });
+  declare source: any;
+  constructor(source: any, original: any) {
+    // Best-effort message: formatting must never replace the original (#4112).
+    try {
+      var message: string | undefined = String(
+        original instanceof Error ? original.message : original
+      );
+    } catch {}
+    super(message, { cause: original });
+    this.source = source;
   }
 }
 
@@ -82,11 +87,35 @@ export class NoOwnerError extends Error {
 }
 
 export class ContextNotFoundError extends Error {
+  /**
+   * In dev, a read site passes the context (and whether a provider above set
+   * it to `undefined`) so the message can name it and say why it has no
+   * value (#4181). Read through `arguments` so production — where the message
+   * is empty — keeps the zero-parameter constructor byte for byte.
+   */
+  constructor(context?: { id: symbol }, providedUndefined?: boolean);
   constructor() {
-    super(
-      __DEV__
-        ? "Context must either be created with a default value or a value must be provided before accessing it."
-        : ""
-    );
+    super(__DEV__ ? contextNotFoundMessage(arguments[0], arguments[1]) : "");
   }
+}
+
+/**
+ * Dev message for a context read with no value. `undefined` means "not
+ * provided" for context, from either side — no default, or a provider
+ * passing `undefined` — so the message says which happened and points at
+ * `null` as the explicit empty value.
+ */
+function contextNotFoundMessage(
+  context: { id: symbol; _undefinedDefault?: boolean } | undefined,
+  providedUndefined: boolean | undefined
+): string {
+  if (!context)
+    return "Context must either be created with a default value or a value must be provided before accessing it.";
+  const description = context.id.description;
+  const name = description ? `Context "${description}"` : "Context";
+  if (providedUndefined)
+    return `${name} was provided with \`undefined\`, which counts as not provided: \`undefined\` means "no value" for context. To provide an empty value, create the context with a \`null\` default (\`createContext<T | null>(null)\`) and pass \`null\`.`;
+  if (context._undefinedDefault)
+    return `${name} has no provider above this read, and \`createContext(undefined)\` does not give it a default: \`undefined\` means "no value" for context. Mount a provider above this read, or use \`null\` as an explicit empty default: \`createContext<T | null>(null)\`.`;
+  return `${name} has no provider above this read and no default value. Mount a provider above this read, or create the context with a default; for an optional context, use \`null\` as the empty default (\`createContext<T | null>(null)\`), not \`undefined\`.`;
 }

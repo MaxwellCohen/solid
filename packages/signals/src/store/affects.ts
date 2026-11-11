@@ -23,7 +23,7 @@
  * (`_storeNode`, `_storeWrappable`), and node birth and the untracked traps
  * reach back through `affectsHooks` (hooks.ts).
  */
-import { GlobalQueue } from "../core/scheduler.js";
+import { GlobalQueue, releaseMarksHook } from "../core/scheduler.js";
 import type { Computed, Signal } from "../core/types.js";
 import { installAffectsHooks, optHooks, type AffectsHooks } from "./hooks.js";
 import { $OWNER, lookupTarget, type StoreFamily, type StoreTarget } from "./target.js";
@@ -59,7 +59,7 @@ export function storeMarks(t: StoreTarget, key: PropertyKey | undefined): Marked
   const entry = scopeOf(node, key);
   if (key === undefined) {
     const found: Marked[] = [node];
-    walk(t.px, entry, found, t.fam, new Set());
+    walk(t.px, entry, found, t._fam, new Set());
     return found;
   }
   entry._scope.add(t.v);
@@ -87,7 +87,7 @@ function walk(
   if (t !== undefined) {
     if (t.pb !== null) entry._scope.add(t.v);
     // The writer's view: the tick's own unflushed guesses are in motion too.
-    if (t.fam?.opt === true) raw = optHooks!.view(t, raw, true);
+    if (optHooks !== null && t.o) raw = optHooks.view(t, raw, true);
     const nodes = t.n;
     if (nodes !== null)
       for (const k of Reflect.ownKeys(nodes))
@@ -98,7 +98,7 @@ function walk(
     if (has !== null) for (const k of Reflect.ownKeys(has)) found.push(has[k as any]);
     if (t.k !== null) found.push(t.k);
     if (t.dk !== null) found.push(t.dk);
-    fam = t.fam ?? fam;
+    fam = t._fam ?? fam;
   }
   for (const k of Reflect.ownKeys(raw))
     if (k !== $OWNER) {
@@ -157,5 +157,5 @@ export function releaseMarkScope(carrier: Marked): void {
   const entry = scopes.get(carrier);
   if (entry === undefined) return;
   scopes.delete(carrier);
-  GlobalQueue._releaseMarks!(entry._inherited);
+  releaseMarksHook!(entry._inherited);
 }

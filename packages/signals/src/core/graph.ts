@@ -4,10 +4,11 @@ import {
   REACTIVE_DISPOSED,
   REACTIVE_RECOMPUTING_DEPS,
   REACTIVE_ZOMBIE,
-  STATUS_PENDING
+  STATUS_PENDING,
+  NewSet
 } from "./constants.js";
 import { deleteFromHeap } from "./heap.js";
-import { disposeChildren } from "./owner.js";
+import { disposeChildren, runCleanup } from "./owner.js";
 import { bumpNotifyEpoch, dirtyQueue } from "./scheduler.js";
 import type { Computed, Link, Signal } from "./types.js";
 
@@ -35,20 +36,24 @@ export function unlinkSubs(link: Link): Link | null {
     if (nextSub === null) {
       // Store slot nodes dispatch to the ONE shared hook — no per-node
       // unobserved closure, no NodeExtension to hold it.
+      // A user hook that throws is collected like a cleanup (owner.ts): the
+      // unlink and the teardown around it carry on.
       if (dep._config & CONFIG_SLOT_NODE) slotUnobservedHook(dep as Signal<any>);
-      else dep._x?._unobserved?.();
+      else if (dep._x?._unobserved) runCleanup(dep._x._unobserved);
       // No more subscribers; only tear down if CONFIG_AUTO_DISPOSE is set.
       // A pending node is exempt: its in-flight async work is an observer —
       // tearing down would orphan the work and re-execute it on the next
       // read. The settle path runs this same last-one-out check when that
       // observer releases (the untracked-read dormancy sweep guards on
       // pending identically).
+      // During a pass's teardown of its unfinished frame, the release waits
+      // for the pass to end (`deferredReleases`, #4142).
       const c = dep as Computed<any>;
       (c as any)._fn &&
         c._config & CONFIG_AUTO_DISPOSE &&
         !(c._flags & REACTIVE_ZOMBIE) &&
         !(c._statusFlags & STATUS_PENDING) &&
-        unobserved(c);
+        (deferredReleases ? deferredReleases.push(c) : unobserved(c));
     }
   }
   return nextDep;
@@ -69,16 +74,26 @@ export function trimStaleDeps(el: Computed<any>): void {
 // Shared by unobserved() and the disposeChildren child loop. The truthy guard
 // (not `!== null`) matters: plain Owners in a child chain have no _deps field,
 // and skipping early also avoids adding one (hidden-class churn) via the
-// null-out below.
+// null-out below. With `_depsTail` cleared, `trimStaleDeps` unlinks the whole
+// list and nulls `_deps`.
 export function clearDeps(el: Computed<unknown>): void {
-  let dep = el._deps;
-  if (!dep) return;
-  do {
-    dep = unlinkSubs(dep);
-  } while (dep !== null);
-  el._deps = null;
-  el._depsTail = null;
+  if (el._deps) {
+    el._depsTail = null;
+    trimStaleDeps(el);
+  }
 }
+
+/**
+ * Last-one-out releases held back while a pass tears down the frame of an
+ * earlier pass that never committed (#4142). The pass is about to rebuild
+ * the same children, which read the same lazy nodes again. Released on the
+ * spot, a lazy async memo whose only reader was the old frame's child memo
+ * was torn down, re-ran on the new child's read, went pending, and the cycle
+ * repeated forever. `recompute` collects them around that teardown and
+ * releases what is still unobserved when the pass ends.
+ */
+export let deferredReleases: Computed<any>[] | null = null;
+export const deferReleases = (list: Computed<any>[] | null) => (deferredReleases = list);
 
 export function unobserved(el: Computed<unknown>) {
   deleteFromHeap(el, dirtyQueue);
@@ -106,7 +121,7 @@ export function unobserved(el: Computed<unknown>) {
  * reclamation still happens within one microtask — the enqueue site arms
  * schedule(), so a flush is guaranteed even when no other work is queued.
  */
-export const dormantNodes = new Set<Computed<unknown>>();
+export const dormantNodes = new NewSet<Computed<unknown>>();
 
 export function sweepDormant(): void {
   if (dormantNodes.size === 0) return;

@@ -4,15 +4,16 @@
  * boundary-scope ruling).
  *
  * A first pass that reads a hold asks the boundaries up its chain
- * (`GlobalQueue._fresh`, the real `catchStatus` walk); when a loading
+ * (`freshHook`, the real `catchStatus` walk); when a loading
  * boundary that has not shown content catches it, the pass is the
  * boundary's, not the tick's: the boundary shows its fallback, the mount
  * publishes, and the content appears at the hold's commit. Outside such a
  * boundary, A15 and the direction rule are unchanged.
  *
- * Re-arm (`on`) under the boundary scope is deferred to a separate change,
- * pending its ruling: those shapes keep next's behavior and are pinned
- * `it.fails` with the ruled display.
+ * Re-arm (`on`) under the boundary scope (U-9, D-14/D-16): a boundary
+ * re-armed by a change that does not join the hold owns its content — what
+ * reads the hold under it waits behind the fallback, and the hold does not
+ * wait for it.
  *
  * Each case is traced on the pre-L2 core (41fdf9696) too; the notes say
  * where it differs and the ruling that explains it. Sources: `held` — the
@@ -288,57 +289,52 @@ describe("#3540: a fresh Loading mounted over a held value", () => {
     await tick();
     expect(log).toContain("open true");
     expect(log).toContain("label 1");
-    expect(log.at(-1)).toBe("view content 1");
+    expect(log).toContain("view content 1");
   });
 
   // The label, created in the mount, reads the hold and joins it, so the
   // mount is part of the hold: the boundary mounted with it appears at the
-  // commit, its fallback never seen (as a boundary under a held Show).
-  // Not fixed here: the boundary's first pass still runs its fallback now
-  // (`view fallback`), as on next.
-  it.fails(
-    "a boundary mounted by a pass that joined the hold appears at its commit, no fallback",
-    async () => {
-      const [x, setX] = createSignal(0);
-      const [open, setOpen] = createSignal(false);
-      const log: string[] = [];
-      createRoot(() => {
-        createRenderEffect(
-          () => {
-            if (!open()) return false;
-            const label = createMemo(() => `label ${x()}`);
-            createRenderEffect(label, v => {
-              log.push(v);
-            });
-            const view = Loading(() => `content ${x()}`, "fallback");
-            createRenderEffect(view, v => {
-              log.push(`view ${v}`);
-            });
-            return true;
-          },
-          v => {
-            log.push(`open ${v}`);
-          }
-        );
-      });
-      flush();
-      let release!: () => void;
-      action(function* () {
-        setX(1);
-        yield new Promise<void>(r => (release = r));
-      })();
-      flush();
-      log.length = 0;
+  // commit, its fallback never seen (as a boundary under a held Show; D-13).
+  it("a boundary mounted by a pass that joined the hold appears at its commit, no fallback", async () => {
+    const [x, setX] = createSignal(0);
+    const [open, setOpen] = createSignal(false);
+    const log: string[] = [];
+    createRoot(() => {
+      createRenderEffect(
+        () => {
+          if (!open()) return false;
+          const label = createMemo(() => `label ${x()}`);
+          createRenderEffect(label, v => {
+            log.push(v);
+          });
+          const view = Loading(() => `content ${x()}`, "fallback");
+          createRenderEffect(view, v => {
+            log.push(`view ${v}`);
+          });
+          return true;
+        },
+        v => {
+          log.push(`open ${v}`);
+        }
+      );
+    });
+    flush();
+    let release!: () => void;
+    action(function* () {
+      setX(1);
+      yield new Promise<void>(r => (release = r));
+    })();
+    flush();
+    log.length = 0;
 
-      setOpen(true);
-      flush();
-      expect(log).toEqual([]);
+    setOpen(true);
+    flush();
+    expect(log).toEqual([]);
 
-      release();
-      await tick();
-      expect([...log].sort()).toEqual(["label 1", "open true", "view content 1"]);
-    }
-  );
+    release();
+    await tick();
+    expect([...log].sort()).toEqual(["label 1", "open true", "view content 1"]);
+  });
 
   it("the boundary's hold stays its own: a mount over another hold after the flush reveals at that hold's release", async () => {
     const [x, setX] = createSignal(0);
@@ -411,7 +407,9 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
   // its pending status is caught again by the normal path: one reader more
   // than next on each boundary passed until the commit, none after it. A
   // render effect born held (content bound) is recorded at its staging, as
-  // one in flight is: held or in flight alike.
+  // one in flight is: held or in flight alike. A memo left pending is held
+  // but never caught (no reader of its own, D-12, #4542): in flight, as
+  // held, the memo content counts as its binding alone.
   const expected: Record<string, string[]> = {
     // The ancestor catches, as pre-L2 (which also runs the binding behind
     // the fallback: `text fresh 0` — L2 holds a run behind a fallback,
@@ -430,23 +428,23 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
       "gate gate · open p · outer outer · text fresh 1"
     ],
     "unrevealed flight memo": [
-      " | o3 i2",
+      " | o2 i1",
       "holder 1 | o1 i0",
       " | o1 i0",
       "gate gate · open fresh 1 · outer outer"
     ],
     "unrevealed flight bound": [
-      " | o3 i2",
+      " | o2 i1",
       "holder 1 | o1 i0",
       " | o1 i0",
       "gate gate · open p · outer outer · text fresh 1"
     ],
     // A re-armed ancestor: the content is pending and its fallback shows
     // now — nothing else holds the re-arming frame (#3575). In flight, as
-    // pre-L2. Held (the ruled display, pinned `it.fails`: re-arm under the
-    // boundary scope is deferred): pre-L2 shows the committed value
-    // (`open fresh 0`, a tear under L2's A29); `next` holds the whole mount
-    // for the commit.
+    // pre-L2. Held (U-9): the mount's pass reads the hold as the boundary's,
+    // not the tick's, so the fallback shows now and the content at the
+    // commit; pre-L2 shows the committed value (`open fresh 0`, a tear under
+    // L2's A29).
     "rearmed outer held memo": [
       "outer outer fallback | o1 i1",
       "open fresh 1 · outer outer · x 1 | o0 i0",
@@ -460,13 +458,13 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
       ""
     ],
     "rearmed outer flight memo": [
-      "outer outer fallback | o2 i2",
+      "outer outer fallback | o1 i1",
       "holder 1 · open fresh 1 · outer outer | o0 i0",
       " | o0 i0",
       ""
     ],
     "rearmed outer flight bound": [
-      "outer outer fallback | o2 i2",
+      "outer outer fallback | o1 i1",
       "holder 1 · open p · outer outer · text fresh 1 | o0 i0",
       " | o0 i0",
       ""
@@ -486,13 +484,13 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
       ""
     ],
     "rearmed flight memo": [
-      "inner inner fallback | i2",
+      "inner inner fallback | i1",
       "holder 1 · inner inner · open fresh 1 | i0",
       " | i0",
       ""
     ],
     "rearmed flight bound": [
-      "inner inner fallback | i2",
+      "inner inner fallback | i1",
       "holder 1 · inner inner · open p · text fresh 1 | i0",
       " | i0",
       ""
@@ -501,14 +499,16 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
     // for its commit, as on next. Pre-L2 shows the committed value now; L2
     // joins the hold (A29).
     "plain held memo": [" | i1", "open fresh 1 · x 1 | i0", " | i0", ""],
-    "plain held bound": [" | i2", "open p · text fresh 1 · x 1 | i0", " | i0", ""],
-    "plain flight memo": [" | i2", "holder 1 · open fresh 1 | i0", " | i0", ""],
-    "plain flight bound": [" | i2", "holder 1 · open p · text fresh 1 | i0", " | i0", ""],
+    // (The born-held memo the mounting flush's hold owns is not recorded:
+    // nothing catches it, D-13.)
+    "plain held bound": [" | i1", "open p · text fresh 1 · x 1 | i0", " | i0", ""],
+    "plain flight memo": [" | i1", "holder 1 · open fresh 1 | i0", " | i0", ""],
+    "plain flight bound": [" | i1", "holder 1 · open p · text fresh 1 | i0", " | i0", ""],
     "revealed held memo": [" | o1 i1", "open fresh 1 · x 1 | o0 i0", " | o0 i0", ""],
-    "revealed held bound": [" | o2 i2", "open p · text fresh 1 · x 1 | o0 i0", " | o0 i0", ""],
-    "revealed flight memo": [" | o2 i2", "holder 1 · open fresh 1 | o0 i0", " | o0 i0", ""],
+    "revealed held bound": [" | o1 i1", "open p · text fresh 1 · x 1 | o0 i0", " | o0 i0", ""],
+    "revealed flight memo": [" | o1 i1", "holder 1 · open fresh 1 | o0 i0", " | o0 i0", ""],
     "revealed flight bound": [
-      " | o2 i2",
+      " | o1 i1",
       "holder 1 · open p · text fresh 1 | o0 i0",
       " | o0 i0",
       ""
@@ -517,91 +517,85 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
   for (const shape of ["unrevealed", "rearmed outer", "revealed", "rearmed", "plain"] as Shape[])
     for (const source of ["held", "flight"] as Source[])
       for (const kind of ["memo", "bound"] as Content[])
-        // Re-arm over a held write: content bound by a render effect is caught
-        // (a boundary that has not shown content keeps a held reader, #3540);
-        // content through a memo is still deferred to the re-arm change.
-        (source === "held" && shape.startsWith("rearmed") && kind === "memo" ? it.fails : it)(
-          `${shape}, ${source}, content ${kind}`,
-          async () => {
-            const log: string[] = [];
-            const [open, setOpen] = createSignal(false);
-            let resolveGate: (() => void) | undefined;
-            let w!: ReturnType<typeof world>;
-            let outerOwner: object | undefined;
-            let innerOwner!: object;
-            let outer: (() => unknown) | undefined;
-            let inner!: () => unknown;
-            const innerFn = () => {
-              innerOwner = getOwner()!;
-              createRenderEffect(
-                () => (open() ? content(kind, w.read, log, "fresh")() : false),
-                v => {
-                  log.push(`open ${v}`);
-                }
-              );
-              return "inner";
-            };
-            const showInner = (on?: () => unknown) => {
-              inner = Loading(innerFn, "inner fallback", on);
-              createRenderEffect(inner, v => {
-                log.push(`inner ${v}`);
-              });
-            };
-            createRoot(() => {
-              w = world(source, log);
-              if (shape === "rearmed" || shape === "plain")
-                return showInner(shape === "rearmed" ? open : undefined);
-              outer = Loading(
-                () => {
-                  outerOwner = getOwner()!;
-                  showInner();
-                  if (shape === "unrevealed") {
-                    const gate = createMemo(
-                      () => new Promise<string>(r => (resolveGate = () => r("gate")))
-                    );
-                    createRenderEffect(gate, v => {
-                      log.push(`gate ${v}`);
-                    });
-                  }
-                  return "outer";
-                },
-                "outer fallback",
-                shape === "rearmed outer" ? open : undefined
-              );
-              createRenderEffect(outer, v => {
-                log.push(`outer ${v}`);
-              });
-            });
-            flush();
-            await w.settle();
-            const end = w.begin();
-            log.length = 0;
-            const steps = [
-              () => (setOpen(true), flush()),
-              end,
-              w.settle,
-              async () => {
-                resolveGate?.();
-                await tick();
+        it(`${shape}, ${source}, content ${kind}`, async () => {
+          const log: string[] = [];
+          const [open, setOpen] = createSignal(false);
+          let resolveGate: (() => void) | undefined;
+          let w!: ReturnType<typeof world>;
+          let outerOwner: object | undefined;
+          let innerOwner!: object;
+          let outer: (() => unknown) | undefined;
+          let inner!: () => unknown;
+          const innerFn = () => {
+            innerOwner = getOwner()!;
+            createRenderEffect(
+              () => (open() ? content(kind, w.read, log, "fresh")() : false),
+              v => {
+                log.push(`open ${v}`);
               }
-            ];
-            const readers = (): [string, number | undefined][] =>
-              outer
-                ? [
-                    ["o", readersOf(outerOwner)],
-                    ["i", readersOf(innerOwner)]
-                  ]
-                : [["i", readersOf(innerOwner)]];
-            const pending = () => [
-              ...(outer && isPending(() => outer!()) ? ["o"] : []),
-              ...(isPending(() => inner()) ? ["i"] : [])
-            ];
-            const out = await trace(steps, log, readers, pending);
-            // The gate step reports the log only.
-            out[3] = out[3].split(" | ")[0];
-            expect(out).toEqual(expected[`${shape} ${source} ${kind}`]);
-          }
-        );
+            );
+            return "inner";
+          };
+          const showInner = (on?: () => unknown) => {
+            inner = Loading(innerFn, "inner fallback", on);
+            createRenderEffect(inner, v => {
+              log.push(`inner ${v}`);
+            });
+          };
+          createRoot(() => {
+            w = world(source, log);
+            if (shape === "rearmed" || shape === "plain")
+              return showInner(shape === "rearmed" ? open : undefined);
+            outer = Loading(
+              () => {
+                outerOwner = getOwner()!;
+                showInner();
+                if (shape === "unrevealed") {
+                  const gate = createMemo(
+                    () => new Promise<string>(r => (resolveGate = () => r("gate")))
+                  );
+                  createRenderEffect(gate, v => {
+                    log.push(`gate ${v}`);
+                  });
+                }
+                return "outer";
+              },
+              "outer fallback",
+              shape === "rearmed outer" ? open : undefined
+            );
+            createRenderEffect(outer, v => {
+              log.push(`outer ${v}`);
+            });
+          });
+          flush();
+          await w.settle();
+          const end = w.begin();
+          log.length = 0;
+          const steps = [
+            () => (setOpen(true), flush()),
+            end,
+            w.settle,
+            async () => {
+              resolveGate?.();
+              await tick();
+            }
+          ];
+          const readers = (): [string, number | undefined][] =>
+            outer
+              ? [
+                  ["o", readersOf(outerOwner)],
+                  ["i", readersOf(innerOwner)]
+                ]
+              : [["i", readersOf(innerOwner)]];
+          const pending = () => [
+            ...(outer && isPending(() => outer!()) ? ["o"] : []),
+            ...(isPending(() => inner()) ? ["i"] : [])
+          ];
+          const out = await trace(steps, log, readers, pending);
+          // The gate step reports the log only.
+          out[3] = out[3].split(" | ")[0];
+          expect(out).toEqual(expected[`${shape} ${source} ${kind}`]);
+        });
 
   /**
    * A revealed outer Loading; a Show under it mounts, in the flush, a fresh
@@ -684,14 +678,14 @@ describe("#3540: the catcher is whoever `catchStatus` would catch at — at any 
         expect(out).toEqual(
           withInner
             ? [
-                "inner inner fallback · open true | o0 f2",
-                `${x1} | o0 f2`,
+                "inner inner fallback · open true | o0 f1",
+                `${x1} | o0 f1`,
                 "inner p · text fresh 1 | o0 f0",
                 " | o0 f0"
               ]
             : [
-                " | o2 f2",
-                " | o2 f2",
+                " | o1 f1",
+                " | o1 f1",
                 [x1, "open p", "text fresh 1"].sort().join(" · ") + " | o0 f0",
                 " | o0 f0"
               ]
@@ -744,9 +738,11 @@ describe("#3540: the boundary scope — committed content, held mounts, no catch
   // committed or staged value (`content 0` in a flush, a tear under A29;
   // `content 1` from mainline); `next` reports the boundary pending while
   // it holds the mount. (Readers: the content's catch walk records it once
-  // more than the normal path, until the commit.)
+  // more than the normal path, until the commit; in flight the first passes
+  // under the boundary are held with the hold, and only render effects are
+  // caught — a pending memo is no reader of its own, D-12, #4542.)
   const observe = (source: Source, x1: string) => [
-    `view fallback | readers=2 view=false m=false latest=${source === "held" ? "content 1" : "throws NotReadyError"}`,
+    `view fallback | readers=${source === "held" ? 2 : 1} view=false m=false latest=${source === "held" ? "content 1" : "throws NotReadyError"}`,
     `${[x1, "view content 1"].sort().join(" · ")} | readers=0 view=false m=false latest=content 1`,
     " | readers=0 view=false m=false latest=content 1"
   ];
@@ -801,28 +797,30 @@ describe("#3540: the boundary scope — committed content, held mounts, no catch
   // Committed content under a revealed boundary, re-run by a plain write
   // to `key` while the hold is up. With `on: key` the boundary is re-armed
   // and owns its subtree: the content that reads the hold waits behind the
-  // fallback, and the hold does not wait for it (the ruled display, pinned
-  // `it.fails`: re-arm under the boundary scope is deferred). Pre-L2 and
-  // `next` show no fallback: the content joins the hold (`next` reports the
-  // boundary pending). Without `on`: A15, the content joins the hold — as
-  // pre-L2 and next. (`memo`:
+  // fallback, and the hold does not wait for it (U-9; pre-L2 showed no
+  // fallback: the content joined the hold). Held, the re-armed content's
+  // derivation is staged in the hold, so `latest` serves it (A11, as for a
+  // fresh boundary's content above); in flight the boundary waits on every
+  // reader it caught or collected. Without `on`: A15, the content joins the
+  // hold — as pre-L2 and next. (`memo`:
   // the boundary's own render reads `m`, so its re-run creates a fresh
   // memo — no value until it loads; `bound`: the binding re-runs over the
   // committed memo, pending with its committed value.)
   const committed: Record<string, string[]> = {
     "held rearmed memo": [
-      "view fallback | readers=1 view=false m=false latest=throws NotReadyError",
+      "view fallback | readers=1 view=false m=false latest=c1 1",
       "view c1 1 · x 1 | readers=0 view=false m=false latest=c1 1",
       " | readers=0 view=false m=false latest=c1 1"
     ],
     "held rearmed bound": [
-      "view fallback | readers=1 view=false m=true latest=c0 0",
+      "view fallback | readers=1 view=false m=true latest=c1 1",
       "text c1 1 · view p · x 1 | readers=0 view=false m=false latest=c1 1",
       " | readers=0 view=false m=false latest=c1 1"
     ],
     "held plain memo": [
-      // The boundary's render creates a fresh memo; its catch walk records it.
-      " | readers=1 view=true m=false latest=c1 1",
+      // The boundary's render creates a fresh memo, born into the flush's
+      // hold: nothing catches or records it (D-13).
+      " | readers=0 view=true m=false latest=c1 1",
       "view c1 1 · x 1 | readers=0 view=false m=false latest=c1 1",
       " | readers=0 view=false m=false latest=c1 1"
     ],
@@ -832,12 +830,12 @@ describe("#3540: the boundary scope — committed content, held mounts, no catch
       " | readers=0 view=false m=false latest=c1 1"
     ],
     "flight rearmed memo": [
-      "view fallback | readers=1 view=false m=true latest=c0 0",
+      "view fallback | readers=3 view=false m=true latest=c0 0",
       "holder 1 · view c1 1 | readers=0 view=false m=false latest=c1 1",
       " | readers=0 view=false m=false latest=c1 1"
     ],
     "flight rearmed bound": [
-      "view fallback | readers=1 view=false m=true latest=c0 0",
+      "view fallback | readers=2 view=false m=true latest=c0 0",
       "holder 1 · text c1 1 · view p | readers=0 view=false m=false latest=c1 1",
       " | readers=0 view=false m=false latest=c1 1"
     ],
@@ -855,87 +853,30 @@ describe("#3540: the boundary scope — committed content, held mounts, no catch
   for (const source of ["held", "flight"] as Source[])
     for (const withOn of [true, false])
       for (const kind of ["memo", "bound"] as Content[])
-        // Re-arm over committed content: deferred to the re-arm change, pending its ruling.
-        (withOn ? it.fails : it)(
-          `${source}, committed content ${withOn ? "under a re-armed boundary" : "under a plain boundary"}, ${kind}`,
-          async () => {
-            const log: string[] = [];
-            const [key, setKey] = createSignal(0);
-            let w!: ReturnType<typeof world>;
-            let m!: () => string;
-            let view!: () => unknown;
-            let owner: object | undefined;
-            createRoot(() => {
-              w = world(source, log);
-              view = Loading(
-                () => {
-                  owner = getOwner()!;
-                  m = createMemo(() => `c${key()} ${w.read()}`);
-                  if (kind === "memo") return m();
-                  createRenderEffect(m, v => {
-                    log.push(`text ${v}`);
-                  });
-                  return "p";
-                },
-                "fallback",
-                withOn ? key : undefined
-              );
-              createRenderEffect(view, v => {
-                log.push(`view ${v}`);
-              });
-            });
-            flush();
-            await w.settle();
-            const out = await steps(
-              log,
-              w,
-              () => setKey(1),
-              () => ({
-                readers: readersOf(owner),
-                view: verdict(() => view(), "pending"),
-                m: verdict(() => m(), "pending"),
-                latest: verdict(() => m(), "latest")
-              })
-            );
-            expect(out).toEqual(committed[`${source} ${withOn ? "rearmed" : "plain"} ${kind}`]);
-          }
-        );
-
-  // A boundary mounted as part of the hold — `<Show when={x()}>`'s memo
-  // creates it, at top level or in a revealed boundary: it appears at the
-  // hold's commit, its fallback never seen — as pre-L2. (In flight `next`
-  // flashes the fallback at the commit; not fixed here, pinned `it.fails`.)
-  for (const source of ["held", "flight"] as Source[])
-    for (const nested of [false, true])
-      (source === "flight" ? it.fails : it)(
-        `${source}, a boundary mounted by the hold${nested ? ", nested" : ""}: no fallback, it appears at the commit`,
-        async () => {
+        it(`${source}, committed content ${withOn ? "under a re-armed boundary" : "under a plain boundary"}, ${kind}`, async () => {
           const log: string[] = [];
+          const [key, setKey] = createSignal(0);
           let w!: ReturnType<typeof world>;
-          let view: (() => unknown) | undefined;
-          let shown!: () => unknown;
+          let m!: () => string;
+          let view!: () => unknown;
+          let owner: object | undefined;
           createRoot(() => {
             w = world(source, log);
-            const body = () => {
-              shown = createMemo(() => {
-                if (w.read() < 1) return null;
-                return (view = Loading(() => `content ${w.read()}`, "fallback"));
-              });
-              createRenderEffect(
-                () => {
-                  const v = shown() as (() => unknown) | null;
-                  return v ? v() : "none";
-                },
-                v => {
-                  log.push(`view ${v}`);
-                }
-              );
-              return "outer";
-            };
-            if (!nested) return body();
-            const outer = Loading(body, "outer fallback");
-            createRenderEffect(outer, v => {
-              log.push(`outer ${v}`);
+            view = Loading(
+              () => {
+                owner = getOwner()!;
+                m = createMemo(() => `c${key()} ${w.read()}`);
+                if (kind === "memo") return m();
+                createRenderEffect(m, v => {
+                  log.push(`text ${v}`);
+                });
+                return "p";
+              },
+              "fallback",
+              withOn ? key : undefined
+            );
+            createRenderEffect(view, v => {
+              log.push(`view ${v}`);
             });
           });
           flush();
@@ -943,20 +884,71 @@ describe("#3540: the boundary scope — committed content, held mounts, no catch
           const out = await steps(
             log,
             w,
-            () => {},
+            () => setKey(1),
             () => ({
-              view: view ? verdict(() => view!(), "pending") : "-",
-              shown: verdict(() => shown(), "pending")
+              readers: readersOf(owner),
+              view: verdict(() => view(), "pending"),
+              m: verdict(() => m(), "pending"),
+              latest: verdict(() => m(), "latest")
             })
           );
-          const v0 = source === "held" ? "false" : "-";
-          expect(out).toEqual([
-            ` | view=${v0} shown=true`,
-            `${source === "held" ? "view content 1 · x 1" : "holder 1 · view content 1"} | view=false shown=false`,
-            " | view=false shown=false"
-          ]);
-        }
-      );
+          expect(out).toEqual(committed[`${source} ${withOn ? "rearmed" : "plain"} ${kind}`]);
+        });
+
+  // A boundary mounted as part of the hold — `<Show when={x()}>`'s memo
+  // creates it, at top level or in a revealed boundary: it appears at the
+  // hold's commit, its fallback never seen — as pre-L2 (D-13). In flight the
+  // memo re-derives in the landing's flush and the content reads the landed
+  // value, born into the landing: nothing to catch.
+  for (const source of ["held", "flight"] as Source[])
+    for (const nested of [false, true])
+      it(`${source}, a boundary mounted by the hold${nested ? ", nested" : ""}: no fallback, it appears at the commit`, async () => {
+        const log: string[] = [];
+        let w!: ReturnType<typeof world>;
+        let view: (() => unknown) | undefined;
+        let shown!: () => unknown;
+        createRoot(() => {
+          w = world(source, log);
+          const body = () => {
+            shown = createMemo(() => {
+              if (w.read() < 1) return null;
+              return (view = Loading(() => `content ${w.read()}`, "fallback"));
+            });
+            createRenderEffect(
+              () => {
+                const v = shown() as (() => unknown) | null;
+                return v ? v() : "none";
+              },
+              v => {
+                log.push(`view ${v}`);
+              }
+            );
+            return "outer";
+          };
+          if (!nested) return body();
+          const outer = Loading(body, "outer fallback");
+          createRenderEffect(outer, v => {
+            log.push(`outer ${v}`);
+          });
+        });
+        flush();
+        await w.settle();
+        const out = await steps(
+          log,
+          w,
+          () => {},
+          () => ({
+            view: view ? verdict(() => view!(), "pending") : "-",
+            shown: verdict(() => shown(), "pending")
+          })
+        );
+        const v0 = source === "held" ? "false" : "-";
+        expect(out).toEqual([
+          ` | view=${v0} shown=true`,
+          `${source === "held" ? "view content 1 · x 1" : "holder 1 · view content 1"} | view=false shown=false`,
+          " | view=false shown=false"
+        ]);
+      });
 
   // No boundary would catch it: a fresh mount reading the hold joins it
   // and waits for its commit (A15), as on next. Pre-L2 shows the committed
@@ -1019,9 +1011,7 @@ describe("#3540: the boundary scope — semantic fuzzer findings (rev 19, seed 9
   // of it is a read of content the boundary owns, so the tree leaves the
   // transaction and re-derives (pending under the boundary) rather than
   // being recorded as a settled reader — which redrew the boundary forever.
-  // Re-arm under the boundary scope is deferred, pending its ruling: next's
-  // display here is the held content, no fallback.
-  it.fails("a held tree under a re-armed boundary re-derives — no redraw loop", async () => {
+  it("a held tree under a re-armed boundary re-derives — no redraw loop", async () => {
     const [s1, setS1] = createSignal(0);
     const [s2, setS2] = createSignal(0);
     const [visible, setShow] = createSignal(true);

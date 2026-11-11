@@ -68,6 +68,22 @@ export const REACTIVE_SCREEN_READ = 1 << 18;
  * later read of the same pass routed it into a verdict lane — that was not
  * the probe's answer (lanes.ts). Per pass. */
 export const REACTIVE_PROBE_UNANSWERED = 1 << 19;
+/** The pass opened a verdict window of its own (`isPending`/`latest`) — not
+ * only read a verdict memo (F-6, core.ts `read`). An async memo whose pass
+ * did not is D-25's hold work while its flight is up (verdict.ts
+ * `holdWork`). Per pass. */
+export const REACTIVE_WINDOW = 1 << 21;
+/** #4544: a render effect born into a hold read a settled verdict reader's
+ * value this pass (core.ts `read`). Per pass: `recompute`'s tail keeps it as
+ * CONFIG_AHEAD. */
+export const REACTIVE_AHEAD = 1 << 20;
+/** An observation-lifecycle node found unobserved by a settle (#2934) while
+ * a pass of it was already queued — a source's landing re-enqueued the
+ * `_blocked` reader it walks (`settlePendingSource`). The release waits for
+ * that pass: a memo nobody read has still produced what the flushes it
+ * missed gave it (D-22, #4474), so the queued pass runs, then `recompute`'s
+ * tail releases the node. Survives the head wipe; the tail consumes it. */
+export const REACTIVE_RELEASE_AFTER = 1 << 22;
 
 // Static configuration bits packed into Owner/Computed/Signal _config.
 export const CONFIG_OWNED_WRITE = 1 << 0;
@@ -81,7 +97,7 @@ export const CONFIG_SYNC = 1 << 6;
 // CONFIG_HELD_CHILDREN, CONFIG_INPUTS_PUBLISHED and CONFIG_ADOPTED_UNFLUSHED
 // (transaction holds, zombies, until()'s authoritative view) went with the
 // transactions.
-// L2 (step 2): three bits, all maintained by the node's commit.
+// L2 (step 2): four bits, all maintained by the node's commit.
 /** The node has a pass awaiting commit: its live children (and `_disposal`)
  * are that pass's and were never shown — a re-pass tears them down on the
  * spot, while the frame parked on `_x._pendingFirstChild` keeps waiting for
@@ -94,6 +110,11 @@ export const CONFIG_STAGED = 1 << 7;
  * parking flush they see the committed value and hold nothing, and are
  * re-derived at the landing. Set at the park seam on every staged node. */
 export const CONFIG_HELD = 1 << 8;
+/** A member of the uncommitted frame a held pass built (ruling A): set at
+ * the park seam on every computed under a staged node (`holdFrame`). Never
+ * shown, it has no screen: its reads are its transaction's, whichever flush
+ * runs it (`bornInto`, #4010). Cleared by its commit. */
+export const CONFIG_HELD_FRAME = 1 << 20;
 /** A15's reveal corollary (#3305): a commit published this flight's inputs
  * beneath it — the node was pending, nothing staged, when it committed — so
  * its committed value is torn against the visible frame. A render effect
@@ -118,6 +139,9 @@ export const CONFIG_SLOT_NODE = 1 << 12;
  * leaf twin of REACTIVE_MANUAL_WRITE). Set by the user setter, cleared by
  * the derive's own write to the key. */
 export const CONFIG_MANUAL_WRITE = 1 << 18;
+/** D-41: the staged value in `_pendingValue` is an error — an
+ * answer of the held frame, published at its landing like a value. */
+export const CONFIG_STAGED_ERROR = 1 << 21;
 /** Lanes — the node carries a written guess (`optimisticWrite`): its own
  * source recomputing it, or a plain write landing on it, is the truth
  * (`supersede`). A lane's derived staging is not. */
@@ -126,15 +150,21 @@ export const CONFIG_GUESS = 1 << 13;
  * pending is a question for its next pass — the verdict changed — so the
  * propagation re-derives it instead of marking it pending (as a kept-tail
  * link does, A30). Set at the window, never cleared: a reader that stopped
- * asking re-derives once and goes pending through its own read. */
-export const CONFIG_VERDICT = 1 << 14;
+ * asking re-derives once and goes pending through its own read. The same
+ * bit as REACTIVE_PROBED: a pass's probe (or a read of a verdict memo,
+ * core.ts `read`) carries into the config at its end without a shift. */
+export const CONFIG_VERDICT = 1 << 15;
 /** A dependency's status is a question for this node's pass, not a fact
  * about its current one: the propagation re-derives it instead of marking
  * it, for errors as for pending (as CONFIG_VERDICT). A boundary's output
  * (show the content, or the fallback) and its `on` node (boundaries.ts); a
  * promise over an expression (`resolve`/`until`, signals.ts: the pass reads
  * the error and rejects, or re-asks a pending source). */
-export const CONFIG_REDERIVE = 1 << 15;
+export const CONFIG_REDERIVE = 1 << 14;
+/** An answered `createDeferred` node (deferred.ts): held because a
+ * downstream hold staged its landing, its re-pass is a lagging question,
+ * not an answer, and joins no transaction (D-40). */
+export const CONFIG_LAGS = 1 << 19;
 /** The reader wants the truth, not the lane's guess (`until`, signals.ts):
  * a read of displayed optimism serves the base the guess covers, makes the
  * pass no lane's, and the truth landing wakes it even when it confirms the
@@ -186,11 +216,54 @@ export const CONFIG_WIDE = 1 << 26;
  * creation by dev builds only (the observe artifact mangles the option name,
  * as it does `_wide`). */
 export const CONFIG_SUPERSEDES = 1 << 27;
+/** Observe tiers only: the memo `merge()` creates for a function source — a
+ * key bag readers consume key by key, built by the framework (a compiled
+ * component spread) with options no user can reach. The attribution engine's
+ * UNSTABLE_MEMO_OUTPUT skips it: a fresh-but-equal bag is the idiom
+ * (`{...(on() ? { a } : {})}`), and the advice (`equals`) cannot be applied
+ * (#4256). Set through `_extraConfig` by observe builds only. */
+export const CONFIG_KEY_BAG = 1 << 28;
+/** The frame (rule 3, D-3): a render effect (set at creation, as
+ * `EFFECT_RENDER << 23` — keep the two in step), and a boundary's tree and
+ * output (boundaries.ts) — structure between the content and the render
+ * effect that shows it, not a user derivation of the content. Outside a
+ * hold's own flush it reads that hold's values as committed and is
+ * re-derived at its landing, and a re-pass of it publishes mainline: it
+ * joins nothing, so two mounts under one boundary made in separate flushes
+ * keep their holds apart (D-4, S-5 rows 1′–3′, #4283). */
+export const CONFIG_FRAME = 1 << 23;
+/** A render effect created by a pass that probed (`isPending`/`latest`) —
+ * the mount a display-ahead `Show` opens (S-46, D-25). Stamped at its first
+ * pass; its first read of a hold's staging or flight is born held, not a
+ * D-3 leaf of the screen, and the verdict lane that opened it reveals with
+ * the landing (lanes.ts `mountPending`). */
+export const CONFIG_MOUNT_AHEAD = 1 << 24;
+/** The node's last answering pass registered a flight: an async memo. Kept
+ * by the verdict engine alone (verdict.ts `holdWork`), which reads it. */
+export const CONFIG_ASYNC = 1 << 29;
+/** #4544: the node's last pass opened a verdict window of its own
+ * (`isPending`/`latest`) — REACTIVE_WINDOW, kept by `recompute`'s tail
+ * beside CONFIG_VERDICT and renewed by every pass. One whose posture is only
+ * inherited (it read a verdict memo) is the hold's work where it reads the
+ * hold's own write (verdict.ts `holdStaging`). */
+export const CONFIG_OWN_PROBE = REACTIVE_WINDOW << 9;
+/** #4544 (F-6): the effect's last pass read a display-ahead value
+ * (REACTIVE_AHEAD): what it went pending on does not hold its hold
+ * (scheduler.ts `blockedBy`). The sign bit: tested by `&` only. */
+export const CONFIG_AHEAD = REACTIVE_AHEAD << 11;
 
 export const STATUS_NONE = 0;
 export const STATUS_PENDING = 1 << 0;
 export const STATUS_ERROR = 1 << 1;
 export const STATUS_UNINITIALIZED = 1 << 2;
+/** An error that answered a node's first read (no value has ever landed):
+ * the error, not UNINITIALIZED, is its status while shown, but a re-ask
+ * makes it uninitialized-pending again — it still has no value (#4244). */
+export const STATUS_NO_VALUE = 1 << 3;
+
+/** `catchHook`'s answer when the catcher is a boundary re-armed by
+ * `on` (truthy, as any catch): what it collects is its own, not the hold's. */
+export const CAUGHT_REARMED = 2;
 
 export const EFFECT_PURE = 0;
 export const EFFECT_RENDER = 1;
@@ -222,3 +295,9 @@ export const $REFRESH = Symbol("refresh");
  * signatures (TS4058).
  */
 export type Refreshable<T> = T & { readonly [$REFRESH]: any };
+
+/** `Set` under a module binding. Bundlers mark a bare `new Set()` pure with
+ * a `/* @__PURE__ *\/` comment that survives minification (16 bytes a site);
+ * a construction through a binding carries none. Same constructor, so the
+ * same objects. */
+export const NewSet = Set;

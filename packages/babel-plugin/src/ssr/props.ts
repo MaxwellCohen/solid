@@ -84,9 +84,11 @@ export function hoistProps(program: NodePath<t.Program>, config: PluginConfig): 
   // program scope's `uids` (the names generateUid handed out — `hasUid` is
   // how a compiler temp is told from user code below) and `data` (imports,
   // templates, events — what postprocess is about to place); both survive.
-  const uids = program.scope.uids;
+  const scope = program.scope as typeof program.scope & { uidsSet?: Set<string> };
+  const uids = scope.uidsSet ? new Set(scope.uidsSet) : scope.uids;
   program.scope.crawl();
-  Object.assign(program.scope.uids, uids);
+  if (uids instanceof Set) for (const name of uids) scope.uidsSet!.add(name);
+  else Object.assign(program.scope.uids, uids);
   program.scope.data = data as Record<string | symbol, unknown>;
 
   const state: HoistState = {
@@ -389,11 +391,17 @@ function hoistSite(p: NodePath<t.ObjectExpression>, state: HoistState): void {
     const fnBody = t.blockStatement([...aliases(m), ...m.node.body.body]);
     if (m.node.kind === "get") {
       const descriptor = scope.generateUidIdentifier("d$");
+      // Carry authored coverage pragmas from the props getter onto the
+      // shared descriptor's `get()` (#2138).
+      const getMethod = t.objectMethod("method", t.identifier("get"), [], fnBody);
+      if (m.node.leadingComments?.length) {
+        getMethod.leadingComments = [...m.node.leadingComments];
+      }
       descriptors.push(
         t.variableDeclarator(
           descriptor,
           t.objectExpression([
-            t.objectMethod("method", t.identifier("get"), [], fnBody),
+            getMethod,
             t.objectProperty(t.identifier("enumerable"), t.booleanLiteral(true)),
             t.objectProperty(t.identifier("configurable"), t.booleanLiteral(true))
           ])

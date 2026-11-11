@@ -8,6 +8,7 @@ import {
 import {
   CONFIG_GUESS,
   CONFIG_OVERRIDE,
+  CONFIG_KEY_BAG,
   CONFIG_PLUMBING,
   CONFIG_WIDE,
   CONFIG_SUPERSEDES,
@@ -537,9 +538,13 @@ export interface AttributionOptions {
   /**
    * Graph-growth warning: emit GRAPH_GROWTH when the live owner count at the
    * settle of the same route has climbed on `visits` consecutive visits
-   * (default 3) to `ratio` or more of the first (default 1.25) — a root or a
+   * (default 3) to `ratio` or more of the first (default 1.25), and so has
+   * the part of it that outlived each of those navigations — a root or a
    * subscription each visit leaves behind, the leak class a heap snapshot
-   * finds. The count is a walk at settle, never per node. `false` disables.
+   * finds, not content a visit owns and leaving disposes. The count is a walk
+   * when a navigation opens and at its settle, never per node. Navigations
+   * that stay on a route pattern continue its visit and are not compared.
+   * `false` disables.
    */
   graphGrowth?: { visits: number; ratio: number } | false;
   /**
@@ -1738,28 +1743,31 @@ function isPlainShape(v: unknown): v is object {
 
 /** Shallow structural equivalence, capped so hot paths stay cheap. */
 const UNSTABLE_KEY_CAP = 64;
+/**
+ * An own data property's value, or ACCESSOR for an accessor or a missing key:
+ * reading an accessor runs user code (#4548), so a diagnostic never does.
+ */
+const ACCESSOR = {};
+function ownData(o: object, key: PropertyKey): unknown {
+  const d = Object.getOwnPropertyDescriptor(o, key);
+  return d && "value" in d ? d.value : ACCESSOR;
+}
+
 function shallowEquivalent(a: object, b: object): boolean {
-  const aArr = Array.isArray(a);
-  if (aArr !== Array.isArray(b)) return false;
-  if (aArr) {
-    const arrA = a as unknown[];
-    const arrB = b as unknown[];
-    if (arrA.length !== arrB.length || arrA.length > UNSTABLE_KEY_CAP) return false;
-    for (let i = 0; i < arrA.length; i++) if (arrA[i] !== arrB[i]) return false;
-    return true;
-  }
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
   // Every own key, symbols included: a symbol-keyed box holding a fresh value
   // each run (web's `dynamic` boxes its in-flight promise) is not equivalent.
+  // An array's indices and `length` are own keys too, so a hole stays a hole.
+  // Descriptors, not values: an accessor is never equivalent.
   const keys = Reflect.ownKeys(a);
-  if (keys.length > UNSTABLE_KEY_CAP || keys.length !== Reflect.ownKeys(b).length) return false;
-  for (const key of keys) {
-    if (
-      !(key in b) ||
-      (a as Record<PropertyKey, unknown>)[key] !== (b as Record<PropertyKey, unknown>)[key]
-    )
-      return false;
-  }
-  return true;
+  return (
+    keys.length <= UNSTABLE_KEY_CAP &&
+    keys.length === Reflect.ownKeys(b).length &&
+    keys.every(key => {
+      const v = ownData(a, key);
+      return v !== ACCESSOR && v === ownData(b, key);
+    })
+  );
 }
 
 /**
@@ -1774,6 +1782,8 @@ function checkUnstableOutput(el: Computed<any>, prevValue: unknown, newValue: un
   // typeof guard: an explicit `unstableMemos: undefined` in enable() options
   // clobbers the default through the spread — treat any non-number as off.
   if (typeof limit !== "number") return;
+  // merge()'s function-source memo: a key bag no user configures (#4256).
+  if (el._config & CONFIG_KEY_BAG) return;
   const node = el as AttributedNode;
   if (
     prevValue === newValue || // paranoia: changed runs should never hit this
@@ -1991,9 +2001,11 @@ function checkEffectCycle(el: Computed<any>, causes: ChangeRecord[]): void {
 // - sole writer: every write to `S` in the session came from this effect.
 //   Medium — real state grows other writers eventually — so it sharpens the
 //   text, not the severity.
-// A tear whose write is neither is `info` (a DOM-measurement effect tears
-// legitimately: the cost of measuring) until the same relay has torn
-// repeatedly, then `warn`.
+// A tear whose write is neither is `info` until the same relay has torn
+// repeatedly, then `warn`. An apply half that takes no argument is reading
+// something other than its compute output (layout, time, a ref — a signal
+// read there is STRICT_READ's): its matching write is no copy, and its tears
+// stay `info` however often they repeat — the cost of measuring.
 
 interface RelayState {
   count: number;
@@ -2019,7 +2031,15 @@ function trackEffectWrite(node: Signal<any> | Computed<any>, record: ChangeRecor
   const writer = info === undefined ? 0 : devId(info.node);
   recordNodes.set(record, node);
   n._devSoleWriter = n._devSoleWriter === undefined || n._devSoleWriter === writer ? writer : null;
-  if (info !== undefined && value !== undefined && value === info.node._value) {
+  // An apply half that takes no argument cannot be copying its compute
+  // output: a match is coincidence (`createEffect(open, () =>
+  // setFlipped(measure()))`).
+  if (
+    info !== undefined &&
+    value !== undefined &&
+    value === info.node._value &&
+    ((info.node as any)._effectFn?.length ?? 1)
+  ) {
     copyWrites.add(record);
     n._devCopyRuns = n._devCopyFrom === writer ? (n._devCopyRuns ?? 0) + 1 : 1;
     n._devCopyFrom = writer;
@@ -2125,7 +2145,13 @@ function checkRelayTear(
   // "reset editable state from a source" shape — the tear is real, but a memo
   // is not the answer, so it stays advisory like any other non-derivable tear.
   const derivable = copy && soleWriter;
-  const severity = derivable || state.count >= RELAY_WARN_AT ? "warn" : "info";
+  // An apply half that ignores its argument writes from outside the graph
+  // (layout, time, a ref; a signal read there is STRICT_READ's): measuring,
+  // so it stays advisory however often it repeats.
+  const severity =
+    derivable || (state.count >= RELAY_WARN_AT && ((relay.node as any)._effectFn?.length ?? 1))
+      ? "warn"
+      : "info";
   // First sighting always reports (advisory); afterwards only the escalation.
   if (state.count > 1 && (severity !== "warn" || state.warned)) return;
   // One verdict per derivable signal: the copy report (checkCopyEffect) and
@@ -2144,12 +2170,10 @@ function checkRelayTear(
         `writers — editable state reset from a source. If the reset is the intent, the tear ` +
         `is its cost; if "${write.name}" only ever mirrors the source, drop the local copy ` +
         `and read the source.`
-      : soleWriter
-        ? `Nothing else writes "${write.name}" — it is derived state: make it a memo over what ` +
-          `the effect reads and every reader gets it in the same flush.`
-        : `If "${write.name}" is computed from what the effect reads, make it a memo so readers ` +
-          `get it in the same flush; if the write reads something outside the graph (layout, ` +
-          `time), the tear is the cost of measuring.`;
+      : (soleWriter ? `Nothing else writes "${write.name}". ` : "") +
+        `If "${write.name}" is computed from what the effect reads, make it a memo so readers ` +
+        `get it in the same flush; if the write reads something outside the graph (layout, ` +
+        `time), the tear is the cost of measuring.`;
   const message =
     `[EFFECT_RELAY_TEAR] ${victimKind} "${nodeName(victim)}" ran twice for one write of ` +
     `"${shared.name}": once in the flush where "${shared.name}" changed, and again after ` +
@@ -2262,8 +2286,12 @@ const listIdentityWarned = new WeakSet<object>();
 
 function recordId(item: unknown): unknown {
   if (item === null || typeof item !== "object") return undefined;
-  const o = item as Record<string, unknown>;
-  return o.id ?? o.key ?? o._id ?? undefined;
+  // Own data properties only: an inherited or own getter is user code.
+  for (const key of ["id", "key", "_id"]) {
+    const v = ownData(item, key);
+    if (v !== ACCESSOR && v != null) return v;
+  }
+  return undefined;
 }
 
 function checkListIdentity(
@@ -2396,13 +2424,11 @@ function asyncOrigin(el: Computed<any>): ChangeOrigin {
 // WeakMaps: an errored/abandoned flight must not leak its node or block GC.
 const liveFlights = new WeakMap<Computed<any>, LiveFlight>();
 const landedFlights = new WeakMap<ChangeRecord, LandedFlight>();
-/**
- * Flight-object identity → earliest known start. Fed by markFlight() (the
- * cooperative preload/cache declaration — populated even while attribution
- * is disabled, so navigation-time marks survive a later enable()) and by
- * first sightings at registration.
- */
-const flightOrigins = new WeakMap<object, number>();
+// Flight-object identity → earliest known start lives on the core's slot
+// (`OBSERVE.attribution.markFlight`/`flightOrigin`), so marks made with no
+// engine loaded — a router's preloads, `lazy()`'s import — and the server's
+// boundary check share it. Fed by markFlight() and by first sightings at
+// registration.
 let waterfallLog: WaterfallRecord[] = [];
 
 /** Deepest landed-flight cause reachable through a cause list (derived links included). */
@@ -2454,8 +2480,8 @@ function emitFlight(
 
 function trackFlightStart(el: Computed<any>, flight: object): void {
   const at = now();
-  const origin = flightOrigins.get(flight) ?? at;
-  if (origin === at) flightOrigins.set(flight, at);
+  const origin = OBSERVE.attribution.flightOrigin(flight) ?? at;
+  if (origin === at) OBSERVE.attribution.markFlight(flight, at);
   // Census: a flight still in the air when the node starts another was
   // superseded — its answer will be discarded.
   const superseded = liveFlights.get(el);
@@ -3071,6 +3097,18 @@ function checkOptimisticRevert(
   // derived override promotes rather than reverts. Same predicate the hold
   // census uses to skip them.
   if (!options.optimisticReverts || isCompanion(el)) return;
+  // A store's guess carrier (store/optimistic.ts, S2): the finding is per
+  // guessed key, named for the key's leaf — the carrier is the engine's unit,
+  // the key is the author's.
+  if ((el as any).guess) {
+    const t = (el as any)._host;
+    for (const key of (el as any).wk ?? []) {
+      const leaf = t.n?.[key];
+      if (leaf !== undefined)
+        checkOptimisticRevert(leaf, (shown as any)?.[key], (truth as any)?.[key], how);
+    }
+    return;
+  }
   // Method call, as every commit path does: store slot nodes share one
   // comparator that reads `this._host` (#3687).
   const equals = (el as { _equals?: false | ((a: unknown, b: unknown) => boolean) })._equals;
@@ -3109,8 +3147,22 @@ function checkOptimisticRevert(
 
 // --- Graph growth -----------------------------------------------------------------
 
-/** Per route: the graph's size at its last `visits` settles, oldest first. */
-const routeCounts = new Map<string, GraphSize[]>();
+/**
+ * Per route: at its last `visits` compared settles, oldest first, the
+ * graph's size and the part of it already alive as a navigation opened.
+ */
+const routeCounts = new Map<string, { size: GraphSize; survived: GraphSize }[]>();
+/**
+ * The route the app last arrived on: a navigation that stays on it (only
+ * its params or query change) continues the visit and is not compared.
+ */
+let visitRoute: string | undefined;
+/**
+ * Every node met as a navigation opened, weakly, for the session: one set,
+ * not one per navigation (see `trackGraph`). Never reset — a node in it was
+ * alive as a navigation opened whichever window met it.
+ */
+const opened = new WeakSet<object>();
 
 /**
  * The live graph's size — a walk, not a counter: nothing is charged at node
@@ -3126,26 +3178,43 @@ const routeCounts = new Map<string, GraphSize[]>();
  * counted unless a subscription still reaches them.
  */
 export function graphSize(): GraphSize {
+  return walkGraph();
+}
+
+/**
+ * The walk behind `graphSize()`. Given `before` alone, it adds every node it
+ * meets to that set: what is alive as a navigation opens. Given `before` and
+ * `survived`, it also counts into `survived` the nodes it meets that are in
+ * the set, and an edge when both its ends are: what outlived a navigation.
+ * Nothing is retained — the set is weak.
+ */
+function walkGraph(before?: WeakSet<object>, survived?: GraphSize): GraphSize {
   const roots = liveRootOwners();
-  const size: GraphSize = { roots: roots.length, owners: 0, computations: 0, signals: 0, edges: 0 };
+  const size: GraphSize = { roots: 0, owners: 0, computations: 0, signals: 0, edges: 0 };
   const seen = new Set<object>();
   // A worklist, not recursion: a subscriber chain can be thousands deep.
   const work: (Signal<any> | Computed<any>)[] = [];
   const stack: Owner[] = [];
+  const count = (node: object, key: keyof GraphSize): void => {
+    size[key]++;
+    if (survived !== undefined) {
+      if (before!.has(node)) survived[key]++;
+    } else if (before !== undefined) before.add(node);
+  };
   const meet = (node: Signal<any> | Computed<any>): void => {
     if (seen.has(node)) return;
     seen.add(node);
-    if (typeof (node as Computed<any>)._fn === "function") size.computations++;
-    else size.signals++;
+    count(node, typeof (node as Computed<any>)._fn === "function" ? "computations" : "signals");
     work.push(node);
   };
   for (const root of roots) {
-    size.owners++;
+    count(root, "roots");
+    count(root, "owners");
     // Iterative: a deep tree must not grow the call stack.
     let child = root._firstChild;
     for (;;) {
       while (child !== null) {
-        size.owners++;
+        count(child, "owners");
         if (typeof (child as Computed<any>)._fn === "function") meet(child as Computed<any>);
         if (child._firstChild !== null) stack.push(child);
         child = child._nextSibling;
@@ -3164,9 +3233,20 @@ export function graphSize(): GraphSize {
       for (let link = (node as Computed<any>)._deps; link !== null; link = link._nextDep) {
         size.edges++;
         meet(link._dep);
+        if (survived !== undefined && before!.has(node) && before!.has(link._dep)) survived.edges++;
       }
   }
   return size;
+}
+
+/**
+ * openNavigation, while the growth check is on: what is alive as a
+ * navigation opens, added to what earlier ones met, for its settle to tell
+ * apart from what it created.
+ */
+function snapshotGraph(): WeakSet<object> {
+  walkGraph(opened);
+  return opened;
 }
 
 /**
@@ -3177,55 +3257,96 @@ export function graphSize(): GraphSize {
  * `createRoot` in an effect with no dispose, a subscription a component
  * registered outside its owner. Nothing here runs per node; the walk is
  * the cost, at navigation cadence.
+ *
+ * A count taken at an arrival also holds everything the visit just created,
+ * so a page whose correctly owned content is bigger each visit climbs too.
+ * What tells the two apart is what outlived a navigation: the nodes alive
+ * as this or any earlier navigation opened (`opened`) that are still alive
+ * at this settle. A visit's own content is not among them; what an earlier
+ * visit left behind is, whatever the content does. A series reports only
+ * when both climb.
+ *
+ * The set is the session's, not this navigation's own snapshot: the walk
+ * meets a long-lived source only through a page that reads it, so a
+ * per-navigation snapshot holds a module-level signal (an HMR registry, a
+ * global store) only when the page just left read it too, and arriving from
+ * pages that share ever more with this one read as growth (#4101). Kept
+ * across navigations, such a source counts at every settle once met, the
+ * same each visit; only what keeps accumulating climbs.
  */
 const GRAPH_SERIES: (keyof GraphSize)[] = ["owners", "computations", "signals", "edges"];
 
-function trackGraph(navigation: NavigationEvent): void {
+function trackGraph(state: NavState): void {
+  const navigation = state.event;
+  const before = state.before;
+  state.before = undefined;
   const cfg = options.graphGrowth;
   if (cfg === false && !records.observed("graph")) return;
-  const size = graphSize();
+  const survived: GraphSize | undefined = before && {
+    roots: 0,
+    owners: 0,
+    computations: 0,
+    signals: 0,
+    edges: 0
+  };
+  const size = walkGraph(before, survived);
   const route = navigation.name ?? navigation.to;
   const event: GraphEvent = { at: now(), ...size, navigation };
   if (route !== undefined) event.route = route;
   records.emit("graph", event, undefined);
+  if (cfg === false || route === undefined) return;
+  // A navigation that stays on the route pattern continues the visit: the
+  // page it kept outlived the move by design, so comparing it would read the
+  // page itself as growth. Only arrivals that enter the route are compared —
+  // a leak made during a visit is still alive when the next one starts. A
+  // superseded navigation never showed, so the app is still where it was.
+  const left = visitRoute;
+  if (navigation.outcome !== "superseded") visitRoute = route;
   // The initial declaration is not a visit (it settles before route content
   // mounts — the same gate the feedback folds apply as `event.initial !== true`);
   // `initial` is `true | undefined`, set only by openNavigation, so truthiness is exact.
-  if (cfg === false || route === undefined || navigation.initial) return;
+  // A navigation opened before the check was on has no snapshot to compare.
+  if (navigation.initial || route === left || survived === undefined) return;
   let history = routeCounts.get(route);
   if (history === undefined) routeCounts.set(route, (history = []));
-  history.push(size);
+  history.push({ size, survived });
   if (history.length > cfg.visits) history.shift();
   if (history.length < cfg.visits) return;
-  // Any series climbing on every visit to the ratio is growth; which ones
-  // did says what leaked — computations with owners flat is an ownerless
-  // effect per visit, edges alone is a subscription per visit to something
-  // long-lived, owners is an undisposed root.
-  const grew = GRAPH_SERIES.filter(key => {
-    for (let i = 1; i < history!.length; i++)
-      if (history![i][key] <= history![i - 1][key]) return false;
-    return history![history!.length - 1][key] >= history![0][key] * cfg.ratio;
-  });
+  const totals = history.map(h => h.size);
+  const kept = history.map(h => h.survived);
+  const climbs = (series: GraphSize[], key: keyof GraphSize): boolean => {
+    for (let i = 1; i < series.length; i++) if (series[i][key] <= series[i - 1][key]) return false;
+    return series[series.length - 1][key] >= series[0][key] * cfg.ratio;
+  };
+  // Any series climbing on every visit to the ratio — in the totals and in
+  // what outlived each navigation — is growth; which ones did says what
+  // leaked — computations with owners flat is an ownerless effect per visit,
+  // edges alone is a subscription per visit to something long-lived, owners
+  // is an undisposed root.
+  const grew = GRAPH_SERIES.filter(key => climbs(totals, key) && climbs(kept, key));
   if (grew.length === 0) return;
   // The count is the whole graph's, so a leak shows at every route's settle;
   // the first route to complete its climb reports, naming the others seen.
   const routes = [...routeCounts.keys()];
-  const series = grew.map(key => `${key} ${history!.map(h => h[key]).join(" → ")}`).join("; ");
+  const join = (series: GraphSize[], key: keyof GraphSize) => series.map(h => h[key]).join(" → ");
+  const series = grew.map(key => `${key} ${join(kept, key)} (of ${join(totals, key)})`).join("; ");
   const shape = grew.includes("owners")
     ? "a createRoot() in an effect or handler with no dispose, or a Portal or panel mounted per visit"
     : grew.includes("computations")
       ? "an effect or memo created with no owner (a module-level or callback createEffect) that only its sources keep alive"
       : "a subscription per visit to something long-lived — a global store or signal read by a computation that outlives the visit";
   const message =
-    `[GRAPH_GROWTH] the live graph grew on ${cfg.visits} consecutive visits to ${route}: ${series} ` +
+    `[GRAPH_GROWTH] the live graph grew on ${cfg.visits} consecutive visits to ${route}, and so did ` +
+    `the part that outlived each navigation there: ${series} ` +
     `(${size.roots} roots)${routes.length > 1 ? `, across visits to ${routes.join(", ")}` : ""}. Each ` +
     `visit left something behind that the next did not reclaim — the shape says ${shape}. Dispose ` +
     `what a visit creates (onCleanup, or return the disposer from onSettled) and own it under the ` +
-    `route's component so leaving the route tears it down.`;
+    `route's component so leaving the route tears it down. A cache that never evicts grows alike.`;
   const data: Record<string, unknown> = {
     route,
     grew,
-    history: history.map(h => ({ ...h })),
+    history: totals,
+    survived: kept,
     roots: size.roots,
     routes
   };
@@ -3473,6 +3594,12 @@ interface NavState {
   held: boolean;
   /** `drainSeq` at its last write — a later drain committed it. */
   writeDrain: number;
+  /**
+   * While `graphGrowth` is on: the session's `opened` set, now holding every
+   * node alive when it opened, for its settle's count of what outlived a
+   * navigation (see `trackGraph`). Dropped there.
+   */
+  before?: WeakSet<object>;
 }
 const navStates = new WeakMap<ChangeOrigin, NavState>();
 /** Opened, not yet settled. */
@@ -3480,6 +3607,14 @@ const openNavs = new Set<NavState>();
 let navigationLog: NavigationEvent[] = [];
 /** Drains completed since enable() — the clock `writeDrain` reads. */
 let drainSeq = 0;
+/**
+ * Navigations settled in a landing, waiting for their graph count: the hook
+ * fires before the landing's commits dispose the frame parked for the page
+ * left, which the walk would still reach through the sources both pages read
+ * (#3989). `land()` runs only inside `flush()`'s drain, so `flushEnd` counts
+ * them, after those commits — the instant a one-drain navigation is counted.
+ */
+const landedGraphs: NavState[] = [];
 
 /**
  * Copy what the router currently says onto the frame (what writes stamped —
@@ -3516,6 +3651,8 @@ function openNavigation(frame: ChangeOrigin, ref: NavigationRef): void {
     held: false,
     writeDrain: drainSeq
   };
+  // The initial declaration is never compared (see `trackGraph`).
+  if (options.graphGrowth !== false && ref.initial !== true) state.before = snapshotGraph();
   syncNavigation(state);
   navStates.set(frame, state);
   openNavs.add(state);
@@ -3597,7 +3734,7 @@ function settleNavigations(t: Transition, hold: HoldEvent | undefined): void {
     if (state === undefined || !openNavs.has(state)) continue;
     // A navigation whose frame is still open when its transition commits
     // (`until()` inside the frame) settles here too: its writes are through.
-    settleNavigation(state, state.held ? "held" : "committed", hold);
+    settleNavigation(state, state.held ? "held" : "committed", hold, true);
   }
 }
 
@@ -3775,6 +3912,9 @@ function trackFlushEnd(): void {
   drainSeq++;
   // The swaps this drain committed have rendered.
   displayFallbacks();
+  // Landed first: they settled before anything this drain settles below.
+  for (let i = 0; i < landedGraphs.length; i++) trackGraph(landedGraphs[i]);
+  landedGraphs.length = 0;
   for (const state of openNavs)
     if (state.open === 0 && !state.held) settleNavigation(state, "committed");
   for (const state of openInteractions) maybeSettleInteraction(state);
@@ -3783,7 +3923,8 @@ function trackFlushEnd(): void {
 function settleNavigation(
   state: NavState,
   outcome: NonNullable<NavigationEvent["outcome"]>,
-  hold?: HoldEvent
+  hold?: HoldEvent,
+  landed?: boolean
 ): void {
   if (!openNavs.has(state)) return;
   openNavs.delete(state);
@@ -3797,7 +3938,8 @@ function settleNavigation(
   // route's responsiveness in the feedback tables. Consumers get the record.
   if (event.initial !== true) for (const f of folds) f.navigation?.(event);
   records.emit("navigation", event, undefined);
-  trackGraph(event);
+  if (landed) landedGraphs.push(state);
+  else trackGraph(state);
   // The interaction that performed it may have been waiting only on this.
   const under = openInteractionOf(event.interaction);
   if (under !== undefined) maybeSettleInteraction(under);
@@ -4427,8 +4569,10 @@ function resetTracking(): void {
   stagedFallbacks.delete(DRAIN);
   trackingGen++;
   openNavs.clear();
+  landedGraphs.length = 0;
   openInteractions.clear();
   routeCounts.clear();
+  visitRoute = undefined;
   drainSeq = 0;
   originFrames.length = 0;
   effectStack.length = 0;
@@ -4570,10 +4714,9 @@ export const attribution: Attribution = {
     // The buffers are typed by their variable; the switch is the proof.
     return buffer as readonly never[];
   },
-  markFlight(flight: object, startedAt: number = now()) {
-    // Earliest wins: re-marking (a cache re-serving the same promise) must
-    // not move the origin later.
-    const existing = flightOrigins.get(flight);
-    if (existing === undefined || startedAt < existing) flightOrigins.set(flight, startedAt);
+  markFlight(flight: object, startedAt?: number) {
+    // Earliest wins (the slot's rule): re-marking (a cache re-serving the
+    // same promise) must not move the origin later.
+    OBSERVE.attribution.markFlight(flight, startedAt);
   }
 };

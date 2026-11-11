@@ -468,6 +468,85 @@ describe("create and use context", () => {
       expect(useContext(ThemeContext)).toBe("light");
     });
   });
+
+  // #4181: `undefined` means "not provided" for context, so an explicit
+  // `createContext(undefined)` is still default-less. The dev message says
+  // so, names the context, and points at `null` as the explicit empty value.
+  test("an explicit undefined default is no default; the dev message says so", () => {
+    const Opt = createContext<string | undefined>(undefined, { name: "Opt" });
+    createRoot(() => {
+      expect(() => useContext(Opt)).toThrow(
+        'Context "Opt" has no provider above this read, and `createContext(undefined)` does not give it a default: `undefined` means "no value" for context. Mount a provider above this read, or use `null` as an explicit empty default: `createContext<T | null>(null)`.'
+      );
+    });
+  });
+
+  test("a default-less read with no Provider suggests a null default", () => {
+    const Todos = createContext<number>();
+    createRoot(() => {
+      expect(() => useContext(Todos)).toThrow(
+        /has no provider above this read and no default value\..*`createContext<T \| null>\(null\)`/
+      );
+    });
+  });
+
+  test("a null default is a value outside any Provider", () => {
+    const OptNull = createContext<string | null>(null);
+    createRoot(() => {
+      expect(useContext(OptNull)).toBeNull();
+    });
+  });
+
+  // The provider has no owner of its own: the value sits on the two memos
+  // that resolve its children. Getter children, function children, and
+  // their re-runs all read it; siblings of the provider do not.
+  test("a provider scopes its value to getter and function children, across re-runs", () => {
+    const Ctx = createContext<string>("outside");
+    const [show, setShow] = createSignal(true);
+    const [label, setLabel] = createSignal("a");
+    const seen: string[] = [];
+    let created = 0;
+    let value: unknown;
+    let sibling!: string;
+    createRoot(() => {
+      const out = (Ctx as any)({
+        value: "inside",
+        get children() {
+          created++;
+          seen.push("getter:" + useContext(Ctx));
+          return [() => (show() ? (seen.push("fn:" + useContext(Ctx)), "shown") : "hidden"), label];
+        }
+      });
+      sibling = useContext(Ctx);
+      createRenderEffect(out, v => {
+        value = v;
+      });
+    });
+    flush();
+    expect(value).toEqual(["shown", "a"]);
+    expect(sibling).toBe("outside");
+    setShow(false);
+    flush();
+    expect(value).toEqual(["hidden", "a"]);
+    setShow(true);
+    setLabel("b");
+    flush();
+    expect(value).toEqual(["shown", "b"]);
+    // Nested accessors re-run without re-creating the children.
+    expect(created).toBe(1);
+    expect(seen).toEqual(["getter:inside", "fn:inside", "fn:inside"]);
+  });
+
+  test("a provider works without an owner above it", () => {
+    const Ctx = createContext<number>();
+    const out = (Ctx as any)({
+      value: 1,
+      get children() {
+        return useContext(Ctx);
+      }
+    });
+    expect(out()).toBe(1);
+  });
 });
 
 describe("runWithOwner", () => {

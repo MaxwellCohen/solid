@@ -258,11 +258,11 @@ fn core_options(options: TransformOptions) -> Result<CompileOptions> {
     };
     Ok(CompileOptions {
         filename: options.filename,
+        root: options.root,
         syntax,
         module_name,
         generate,
         hydratable: options.hydratable.unwrap_or(false),
-        server_components: options.server_components.unwrap_or(false),
         hoist_props: options.hoist_props.unwrap_or(true),
         dev: options.dev.unwrap_or(false),
         // `sourceNames` follows `dev`: unset, every kind is `dev`; in the
@@ -277,6 +277,7 @@ fn core_options(options: TransformOptions) -> Result<CompileOptions> {
                 Some(Either::B(picked)) => SourceNames {
                     components: picked.components.unwrap_or(dev),
                     bindings: picked.bindings.unwrap_or(dev),
+                    locations: picked.locations.unwrap_or(dev),
                 },
             }
         },
@@ -289,6 +290,7 @@ fn core_options(options: TransformOptions) -> Result<CompileOptions> {
         inline_styles: options.inline_styles.unwrap_or(true),
         effect_wrapper: wrapper(options.effect_wrapper),
         wrap_conditionals: options.wrap_conditionals.unwrap_or(true),
+        lower_show: options.lower_show.unwrap_or(!options.dev.unwrap_or(false)),
         memo_wrapper: wrapper(options.memo_wrapper),
         static_marker: options.static_marker.unwrap_or_else(|| "@static".into()),
         require_import_source: options.require_import_source,

@@ -7,6 +7,9 @@ import solidPlugin from "@solidjs/vite-plugin";
 
 const compiler = process.env.JSX_COMPILER === "babel" ? "babel" : "native";
 import { resolve } from "path";
+// `LOWER_SHOW=1` compiles with `<Show>` lowered to a ternary, as production
+// builds do (dev builds keep the component).
+const lowerShow = process.env.LOWER_SHOW === "1" ? { lowerShow: true } : {};
 
 const rootDir = resolve(import.meta.dirname);
 
@@ -14,13 +17,10 @@ export default defineConfig({
   // `sourceNames`: what the vite plugin's dev/observe postures pass, so
   // compiled `<Comp />` reaches the server `createComponent` with its label
   // and diagnostics carry `ownerPath` (server-diagnostics.spec.tsx pins it).
-  // `serverComponents`: what the plugin passes for an SSR build with
-  // `serverFunctions.components` — binding-slot positions (`ref`/`on*`, dynamic
-  // `class`/`style`) compile to runtime holes (test/server/frame-binding-slots).
   plugins: [
     solidPlugin({
       compiler,
-      solid: { generate: "ssr", hydratable: true, sourceNames: true, serverComponents: true }
+      solid: { generate: "ssr", hydratable: true, sourceNames: true, ...lowerShow }
     })
   ],
   test: {

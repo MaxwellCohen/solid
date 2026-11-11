@@ -9,74 +9,84 @@ export default function reconcileArrays(
   marker?: Node | null
 ): void;
 export default function reconcileArrays(parentNode: any, a: any[], b: any[], marker?: any) {
+  // Moves keep the node holding focus connected with `moveBefore()` where
+  // the browser has it, so focus survives (#3997). Focus is read once per
+  // pass, and not at all without `moveBefore()` or with focus on the body.
+  // Only a connected node that holds focus takes `moveBefore()`: using it for
+  // every node cost whole-list reorders 4–8% once layout ran, and checking
+  // `isConnected` first keeps new nodes off the focus check. It throws for a
+  // detached parent, hence the `isConnected` check on the parent.
+  let active = parentNode.moveBefore && parentNode.isConnected && document.activeElement;
+  if (active === document.body) active = null;
+  // A markerless hole retags with its parent, so a tag from another slot never sticks.
+  const slot = marker || parentNode;
+  const insert = (n, ref) => {
+    active && n.isConnected && n.contains(active)
+      ? parentNode.moveBefore(n, ref)
+      : parentNode.insertBefore(n, ref);
+    if (marker || n[$$SLOT]) n[$$SLOT] = slot;
+  };
+  // First mount: skip the diff's setup, which cost spa-navigation mounts ~8%.
+  if (!a.length) {
+    for (const n of b) insert(n, marker);
+    return;
+  }
+  // Ownership: an unclaimed node (no `$$SLOT`) is fair game; a tagged node
+  // belongs only to the slot whose marker matches. `a[]` can name a node that
+  // user code moved out of this parent (or into another slot of it); every
+  // anchor read and destructive op below checks before touching one.
+  const isLive = n => {
+    if (!n) return false;
+    const tag = n[$$SLOT];
+    return n.parentNode === parentNode && (!tag || tag === slot);
+  };
   let bLength = b.length,
     aEnd = a.length,
     bEnd = bLength,
     aStart = 0,
     bStart = 0,
     tail = a[aEnd - 1],
-    tailTag = tail[$$SLOT],
-    // Ownership tag: an unclaimed node (no `$$SLOT`) is fair game; a tagged
-    // node belongs only to the slot whose marker matches. If `a`'s tail has
-    // migrated to another slot — same parent or otherwise — `tail.nextSibling`
-    // points into a region we don't own, so fall back to `marker`. `marker ||
-    // null` keeps non-multi (root-mode) callers happy.
-    after =
-      tail.parentNode === parentNode && (!tailTag || tailTag === marker)
-        ? tail.nextSibling
-        : marker || null,
+    // If `a`'s tail has migrated to another slot — same parent or otherwise —
+    // `tail.nextSibling` points into a region we don't own, so fall back to
+    // `marker`. `marker || null` keeps non-multi (root-mode) callers happy.
+    after = isLive(tail) ? tail.nextSibling : marker || null,
     map = null,
     anchor,
     anchorTag;
 
-  // `a[]` can name a node that replace/swap already took out of this
-  // parent (or out of this slot). Prefix/suffix must not treat those as
-  // still-live common ends — that was the 2fe6310f drop (#574).
-  const isLive = n => {
-    if (!n) return false;
-    const tag = n[$$SLOT];
-    return n.parentNode === parentNode && (!tag || tag === marker);
-  };
-
   while (aStart < aEnd || bStart < bEnd) {
-    // common prefix
-    if (a[aStart] === b[bStart] && isLive(a[aStart])) {
+    // common prefix / suffix. Neither walk checks liveness: inside the open
+    // range [aStart, aEnd) this pass never detaches a node (replace, remove
+    // and swap all consume the node they take out), and a node user code
+    // migrated away is left alone by skipping it here — every destructive
+    // branch below still gates on ownership. The suffix walk is bounded to
+    // the open range: unbounded, it could reach back past `aStart` to a node
+    // a map-branch replace had already taken out while it was still pending
+    // in `b`, count it as a live common end, and never reinsert it (#574).
+    if (a[aStart] === b[bStart]) {
       aStart++;
       bStart++;
       continue;
     }
-    // common suffix
-    while (a[aEnd - 1] === b[bEnd - 1] && isLive(a[aEnd - 1])) {
+    while (aEnd > aStart && bEnd > bStart && a[aEnd - 1] === b[bEnd - 1]) {
       aEnd--;
       bEnd--;
     }
     // append
     if (aEnd === aStart) {
-      let node;
-      if (bEnd < bLength) {
-        if (bStart) {
-          const prev = b[bStart - 1];
-          const prevTag = prev[$$SLOT];
-          node =
-            prev.parentNode === parentNode && (!prevTag || prevTag === marker)
-              ? prev.nextSibling
-              : after;
-        } else node = b[bEnd - bStart];
-      } else node = after;
+      // Anchor on the first suffix node still ours (user code can move one
+      // away), else `after`. Not on the last placed node's successor: that
+      // can be an old node the replace below left waiting in place.
+      let k = bEnd;
+      while (k < bLength && !isLive(b[k])) k++;
+      const node = k < bLength ? b[k] : after;
 
-      while (bStart < bEnd) {
-        const n = b[bStart++];
-        parentNode.insertBefore(n, node);
-        if (marker) n[$$SLOT] = marker;
-      }
+      while (bStart < bEnd) insert(b[bStart++], node);
       // remove
     } else if (bEnd === bStart) {
       while (aStart < aEnd) {
         const n = a[aStart++];
-        if (!map || !map.has(n)) {
-          const tag = n[$$SLOT];
-          if (n.parentNode === parentNode && (!tag || tag === marker)) n.remove();
-        }
+        if ((!map || !map.has(n)) && isLive(n)) n.remove();
       }
       // swap backward — symmetric end-swap detected. Walk inward with a single
       // stable front anchor (a[aStart]); each move targets the same DOM-position
@@ -91,29 +101,26 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
       (anchor = a[aStart]) === b[bEnd - 1] &&
       b[bStart] === a[aEnd - 1] &&
       anchor.parentNode === parentNode &&
-      (!(anchorTag = anchor[$$SLOT]) || anchorTag === marker)
+      (!(anchorTag = anchor[$$SLOT]) || anchorTag === slot)
     ) {
       // Tightest inner loop in the file; one `insertBefore` per iter plus an
-      // end-condition probe. Splitting on `marker` avoids a per-iter branch in
-      // the hot path — js-framework-benchmark `05_swap1k` regresses ~6.5% when
-      // this is collapsed (validated 2026-05-16 on Chrome headless).
-      if (marker) {
-        do {
-          const n = a[--aEnd];
-          parentNode.insertBefore(n, anchor);
-          n[$$SLOT] = marker;
-          bStart++;
-          if (aStart >= aEnd - 1 || bStart >= bEnd) break;
-        } while (a[aStart] === b[bEnd - 1] && b[bStart] === a[aEnd - 1]);
-      } else {
-        do {
-          parentNode.insertBefore(a[--aEnd], anchor);
-          bStart++;
-          if (aStart >= aEnd - 1 || bStart >= bEnd) break;
-        } while (a[aStart] === b[bEnd - 1] && b[bStart] === a[aEnd - 1]);
-      }
+      // end-condition probe. One loop for both kinds of hole: `insert` tags, and
+      // a markerless hole must retag here too.
+      do {
+        insert(a[--aEnd], anchor);
+        bStart++;
+        if (aStart >= aEnd - 1 || bStart >= bEnd) break;
+      } while (a[aStart] === b[bEnd - 1] && b[bStart] === a[aEnd - 1]);
       // fallback to map
     } else {
+      // An old node that is no longer ours holds no position in this region:
+      // it can neither be replaced nor anchor an insert — both used to put the
+      // new node at the region's end, out of order. Consume it and let the new
+      // node land when its own turn comes.
+      if (!isLive(a[aStart])) {
+        aStart++;
+        continue;
+      }
       if (!map) {
         map = new Map();
         let i = bStart;
@@ -134,32 +141,21 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
           }
 
           if (sequence > index - bStart) {
-            const head = a[aStart];
-            const headTag = head[$$SLOT];
-            const node =
-              head.parentNode === parentNode && (!headTag || headTag === marker) ? head : after;
-            while (bStart < index) {
-              const n = b[bStart++];
-              parentNode.insertBefore(n, node);
-              if (marker) n[$$SLOT] = marker;
-            }
+            const node = a[aStart];
+            while (bStart < index) insert(b[bStart++], node);
           } else {
-            const oldNode = a[aStart++];
-            const newNode = b[bStart++];
-            const oldTag = oldNode[$$SLOT];
-            if (oldNode.parentNode === parentNode && (!oldTag || oldTag === marker)) {
-              parentNode.replaceChild(newNode, oldNode);
-            } else {
-              parentNode.insertBefore(newNode, after);
-            }
-            if (marker) newNode[$$SLOT] = marker;
+            // `replaceChild` detaches the old node, which is placed again
+            // later in this pass. While focus is in the list, insert instead
+            // and leave the old node waiting in place, so it keeps focus.
+            const newNode = b[bStart++],
+              node = a[aStart++];
+            active && parentNode.contains(active)
+              ? insert(newNode, node)
+              : parentNode.replaceChild(newNode, node);
+            if (marker || newNode[$$SLOT]) newNode[$$SLOT] = slot;
           }
         } else aStart++;
-      } else {
-        const n = a[aStart++];
-        const nTag = n[$$SLOT];
-        if (n.parentNode === parentNode && (!nTag || nTag === marker)) n.remove();
-      }
+      } else a[aStart++].remove();
     }
   }
 }

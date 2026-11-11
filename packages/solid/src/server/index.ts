@@ -10,9 +10,9 @@ export {
   affects,
   createEffect,
   createMemo,
+  createDeferred,
   createOptimistic,
   createOptimisticStore,
-  createOwner,
   createProjection,
   createReaction,
   createRenderEffect,
@@ -23,6 +23,7 @@ export {
   deep,
   flatten,
   flush,
+  from,
   getNextChildId,
   getObserver,
   getOwner,
@@ -36,6 +37,7 @@ export {
   omit,
   onCleanup,
   onSettled,
+  onFlush,
   latest,
   reconcile,
   refresh,
@@ -55,6 +57,12 @@ export {
   ROOT_ERROR_HOOK
 } from "./signals.js";
 export type { ClientErrorContext, ClientErrorHook, ClientErrorsConfig } from "./signals.js";
+// `createOwner`: a bare owner, for the runtimes' own scopes (`NoHydration`,
+// `Portal`, a frame's fill). Exported at runtime (typed for renderers through
+// `solid-js/internal`), `@internal` because application code hosts a scope
+// with `createRoot()` and re-enters one with `runWithOwner()`, as in 1.x.
+/** @internal */
+export { createOwner } from "./signals.js";
 
 // All type re-exports from signals
 export type {
@@ -65,6 +73,7 @@ export type {
   ExternalSource,
   ExternalSourceConfig,
   ExternalSourceFactory,
+  FromSource,
   Merge,
   NoInfer,
   NotWrappable,
@@ -132,7 +141,7 @@ export * from "./flow.js";
 export type { ArrayElement, Element } from "../types.js";
 
 // SSR coordination
-export { NoHydration, Hydration, isHydrating, isHydratable } from "./hydration.js";
+export { NoHydration, Hydration, isHydrating, isHydratable, onHydrationEnd } from "./hydration.js";
 export type { HydrationContext } from "./hydration.js";
 
 // Seams for the runtimes in this repo, reached through `solid-js/internal`
@@ -158,6 +167,22 @@ export {
   reportServerError
 } from "./signals.js";
 export type { ServerErrorSite, ServerErrorHook } from "./signals.js";
+/** @internal Dependency edges (the frames server installs them). */
+export { trackFillReads, beginEdgesRender } from "./edges.js";
+/** @internal Client-only: the server has no writes to observe. */
+export function setWriteHook(_hook: ((node?: object) => void) | null): void {}
+/** @internal Dependency edges: client-only (the server names through `beginEdgesRender`). */
+export function setSignalIdentities(_on: boolean): void {}
+/** @internal Dependency edges: client-only. */
+export function setReadWatch(_watch: ((node: object) => void) | null): void {}
+/** @internal Dependency edges: client-only. */
+export function signalName(_node: object | undefined): string | undefined {
+  return undefined;
+}
+/** @internal Dependency edges: client-only. */
+export function storeName(_proxy: object | undefined): string | undefined {
+  return undefined;
+}
 /** @internal */
 export { ssrHandleError, ssrScope } from "./hydration.js";
 // After the runtime modules above, so this import adds no edge to the module
@@ -199,10 +224,6 @@ export function adoptedAnswerStream(thenable: any): any {
 /** @internal */
 export function withHydrationGate(create: (hydrated: () => boolean) => any): any {
   return create(() => true);
-}
-/** @internal */
-export function onHydrationEnd(callback: () => void): void {
-  queueMicrotask(callback);
 }
 /** @internal */
 export function noHydrationId(): boolean {

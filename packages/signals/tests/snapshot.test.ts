@@ -3,12 +3,15 @@ import {
   createErrorBoundary,
   createMemo,
   createProjection,
+  createRenderEffect,
   createRoot,
   createSignal,
   createStore,
   flush,
   getOwner,
+  mapArray,
   markSnapshotScope,
+  onSettled,
   releaseSnapshotScope,
   runWithOwner,
   setSnapshotCapture,
@@ -437,6 +440,120 @@ describe("insertSubs optimization", () => {
   });
 });
 
+describe("markSnapshotScope(node, served) — a served answer as a computed's snapshot", () => {
+  // Hydration's arm: a memo adopted with its server answer still in flight
+  // has no creation snapshot; when the answer lands, it becomes one — even
+  // after a client write took the compute over. A scope created after that
+  // (a late boundary resume) reads the served answer, then catches up.
+  it("a pending-at-creation memo: scoped readers read the served answer, replay at release", async () => {
+    let resolveFirst!: (v: string) => void;
+    let resolveSecond!: (v: string) => void;
+    let setKey!: (v: string) => void;
+    let memoNode!: any;
+    let $memo!: () => string;
+    createRoot(() => {
+      setSnapshotCapture(true);
+      const [$key, _setKey] = createSignal("k");
+      setKey = _setKey;
+      let first = true;
+      $memo = createMemo(() => {
+        memoNode = getOwner();
+        const k = $key();
+        if (first) {
+          first = false;
+          return new Promise<string>(r => (resolveFirst = r));
+        }
+        return new Promise<string>(r => (resolveSecond = r)).then(v => v + k);
+      });
+    });
+    flush();
+
+    // A client write supersedes the served flight; its own flight is open.
+    setKey("j");
+    flush();
+    markSnapshotScope(memoNode, "served:k");
+
+    let scope!: any;
+    const seen: string[] = [];
+    createRoot(() => {
+      scope = getOwner()!;
+      markSnapshotScope(scope);
+      createRenderEffect(
+        () => $memo(),
+        v => void seen.push(v)
+      );
+    });
+    flush();
+    // Pending flight, yet the scoped reader is served the snapshot.
+    expect(seen).toEqual(["served:k"]);
+
+    releaseSnapshotScope(scope);
+    flush();
+    resolveSecond("client:");
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+    expect(seen).toEqual(["served:k", "client:j"]);
+    resolveFirst("late");
+    clearSnapshots();
+  });
+
+  it("keeps a snapshot the node already has", () => {
+    let node!: any;
+    let $memo!: () => number;
+    createRoot(() => {
+      setSnapshotCapture(true);
+      $memo = createMemo(() => {
+        node = getOwner();
+        return 1;
+      });
+      expect($memo()).toBe(1);
+    });
+    markSnapshotScope(node, 2);
+    let scope!: any;
+    let read!: number;
+    createRoot(() => {
+      scope = getOwner()!;
+      markSnapshotScope(scope);
+      createRenderEffect(
+        () => $memo(),
+        v => void (read = v)
+      );
+    });
+    flush();
+    expect(read).toBe(1);
+    releaseSnapshotScope(scope);
+    clearSnapshots();
+  });
+
+  it("does nothing outside capture", () => {
+    let node!: any;
+    let $memo!: () => number;
+    createRoot(() => {
+      $memo = createMemo(() => {
+        node = getOwner();
+        return 1;
+      });
+    });
+    markSnapshotScope(node, 2);
+    setSnapshotCapture(true);
+    let scope!: any;
+    let read!: number;
+    createRoot(() => {
+      scope = getOwner()!;
+      markSnapshotScope(scope);
+      createRenderEffect(
+        () => $memo(),
+        v => void (read = v)
+      );
+    });
+    flush();
+    expect(read).toBe(1);
+    releaseSnapshotScope(scope);
+    clearSnapshots();
+  });
+});
+
 describe("ownedWrite signals excluded from snapshot capture", () => {
   it("error boundary functions correctly under active snapshot capture", () => {
     let result!: () => any;
@@ -755,6 +872,90 @@ describe("store snapshot support", () => {
     flush();
 
     expect(target.child?.[meta]).toBe("keep");
+  });
+
+  it("a structural write to a store array during capture is held for scoped readers", () => {
+    let labels!: () => string[];
+    let owner!: any;
+    let runs = 0;
+
+    createRoot(() => {
+      setSnapshotCapture(true);
+      owner = getOwner()!;
+      markSnapshotScope(owner);
+
+      const [state, setState] = createStore({ items: [{ label: "remove" }, { label: "keep" }] });
+      labels = mapArray(
+        () => state.items,
+        item => {
+          runs++;
+          return item.label;
+        }
+      );
+      expect(labels()).toEqual(["remove", "keep"]);
+
+      onSettled(() => {
+        setState(s => {
+          s.items.splice(0, 1);
+        });
+      });
+    });
+    flush();
+
+    expect(labels()).toEqual(["remove", "keep"]);
+    expect(runs).toBe(2);
+
+    releaseSnapshotScope(owner);
+    flush();
+
+    expect(labels()).toEqual(["keep"]);
+    expect(runs).toBe(2);
+    clearSnapshots();
+  });
+
+  it("a key added to a wide owned record during capture is held for scoped readers", () => {
+    const initial: Record<string, number> = {};
+    for (let i = 0; i < 40; i++) initial["k" + i] = i;
+    let owner!: any;
+    let state!: Record<string, number>;
+    let setState!: (fn: (s: Record<string, number>) => void) => void;
+    createRoot(() => {
+      owner = getOwner()!;
+      [state, setState] = createStore(initial);
+    });
+    setState(s => {
+      s.k0 = 100;
+    });
+    flush();
+
+    let keys!: () => string[];
+    let late!: () => string[];
+    runWithOwner(owner, () => {
+      setSnapshotCapture(true);
+      markSnapshotScope(owner);
+      keys = createMemo(() => Object.keys(state));
+      expect(keys()).toHaveLength(40);
+      onSettled(() => {
+        setState(s => {
+          s.extra = 1;
+        });
+      });
+    });
+    flush();
+    runWithOwner(owner, () => {
+      late = createMemo(() => Object.keys(state));
+    });
+
+    expect(keys()).toHaveLength(40);
+    expect(late()).toHaveLength(40);
+    expect(state.extra).toBe(1);
+
+    releaseSnapshotScope(owner);
+    flush();
+
+    expect(keys()).toContain("extra");
+    expect(late()).toContain("extra");
+    clearSnapshots();
   });
 });
 

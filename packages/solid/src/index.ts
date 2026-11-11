@@ -3,7 +3,6 @@ export {
   $TRACK,
   action,
   affects,
-  createOwner,
   createReaction,
   createTrackedEffect,
   deep,
@@ -22,6 +21,7 @@ export {
   omit,
   onCleanup,
   onSettled,
+  onFlush,
   latest,
   reconcile,
   refresh,
@@ -40,6 +40,13 @@ export {
 } from "@solidjs/signals";
 /** @internal — the key a root owner carries `render`'s `onError` under, for the web runtime. */
 export { ROOT_ERROR_HOOK } from "@solidjs/signals";
+// `createOwner`: a bare owner, for the runtimes' own scopes (`NoHydration`,
+// `Portal`, a frame's fill). Exported at runtime (typed for renderers through
+// `solid-js/internal`), `@internal` because application code hosts a scope
+// with `createRoot()` and re-enters one with `runWithOwner()`, as in 1.x.
+/** @internal */
+export { createOwner } from "@solidjs/signals";
+export { from } from "./from.js";
 
 export type {
   ClientErrorContext,
@@ -53,6 +60,7 @@ export type {
   ExternalSource,
   ExternalSourceConfig,
   ExternalSourceFactory,
+  FromSource,
   Merge,
   MemoOptions,
   NoInfer,
@@ -102,6 +110,7 @@ export {
   enableHydration,
   createRoot,
   createMemo,
+  createDeferred,
   createSignal,
   createStore,
   createProjection,
@@ -112,7 +121,8 @@ export {
   NoHydration,
   Hydration,
   isHydrating,
-  isHydratable
+  isHydratable,
+  onHydrationEnd
 } from "./client/hydration.js";
 // Seams for the runtimes in this repo, reached through `solid-js/internal`
 // (src/internal.ts): exported here at runtime so that entry shares this
@@ -132,7 +142,8 @@ export { enableServerComponentHydration } from "./client/hydration.js";
 // adapter module (client/store-hydration.ts) reads — that entry bundles its
 // own copy of the adapter and resolves the adapter's `./hydration.js` import
 // to this package, so the copy shares THIS instance's state (sharedConfig,
-// the hydration-end callbacks, the latch set, the sentinel). Runtime exports
+// the hydration-end callbacks — through `onHydrationEnd`, public above — the
+// latch set, the sentinel). Runtime exports
 // so that entry shares this module's state; `@internal`, stripped from the
 // declarations.
 /** @internal */
@@ -145,7 +156,6 @@ export {
   wrapFirstYield,
   adoptedAnswerStream,
   withHydrationGate,
-  onHydrationEnd,
   noHydrationId,
   markTopLevelSnapshotScope,
   hasLoadingWindow,
@@ -179,6 +189,22 @@ export function runInServerComponentScope<T>(fn: () => T, _options?: { live?: bo
 /** @internal */
 export function creationStamp(): number {
   return 0;
+}
+/** @internal A callback run before every signal or store write lands (deferred hydration). */
+export { setWriteHook } from "@solidjs/signals";
+/** @internal Dependency edges: name plain signals so a write reports which one; dev read watch. */
+export { setSignalIdentities, setReadWatch, signalName, storeName } from "@solidjs/signals";
+/** @internal Dependency edges: server-only (an edges render names plain signals). Client: no-op. */
+export function beginEdgesRender(): () => void {
+  return () => {};
+}
+/** @internal Dependency edges: server-only read tracking; the client runs `fn`. */
+export function trackFillReads<T>(fn: () => T): {
+  result: T;
+  reads: Set<string> | null;
+  untracked: boolean;
+} {
+  return { result: fn(), reads: null, untracked: false };
 }
 /** @internal */
 export function inServerComponentScope(): boolean {
@@ -279,19 +305,6 @@ export type {
 export type { RecoveryEvent, RecoveryLive, RecoveryListener } from "./recovery.js";
 export type { ChangeOrigin } from "@solidjs/signals/attribution";
 
-// handle multiple instance check
-declare global {
-  var Solid$$: boolean;
-}
-
-if (IS_DEV && globalThis) {
-  if (!globalThis.Solid$$) globalThis.Solid$$ = true;
-  else
-    console.warn(
-      "You appear to have multiple instances of Solid. This can lead to unexpected behavior."
-    );
-}
-
 // Point-of-pain discovery: the first console report of each diagnostic code
 // gains a footer naming the repair skill shipped with this package — see
 // console-footer.ts (shared with the server entry).
@@ -302,17 +315,15 @@ export {
   batch, // flush
   catchError, // old version handled by createErrorBoundary. new version is different helper.
   createComputed, // nope
-  createDeferred, // take it outside
   createResource, // all computations
   createSelector, // createProjection
   DevHooks,
   enableScheduling,
   equalFn, // renamed `isEqual`
-  from, // handled by async iterators
   getListener, // renamed `getObserver`
   indexArray, // handled in `mapArray`
   Index, // handled by For
-  observable, // handled by async iterators
+  observable, // push out with createEffect; `from` is exported above
   on, // with split effects this doesn't need to be core
   onError, // handled by ErrorBoundary
   onMount, // onSettled

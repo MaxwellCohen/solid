@@ -24,8 +24,9 @@ import {
   createStore,
   createOptimisticStore
 } from "../src/client/hydration.js";
-import { lazy } from "../src/client/component.js";
+import { lazy, lazyModule } from "../src/client/component.js";
 import { Errored, Loading } from "../src/client/flow.js";
+import { from } from "../src/from.js";
 
 // Enable the hydration-aware wrappers
 enableHydration();
@@ -86,13 +87,14 @@ describe("Error Boundary Hydration", () => {
           () => "children content",
           (err: any) => `fallback: ${err().message}`
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
-    expect(result).toBe("fallback: server error");
+    expect(result()).toBe("fallback: server error");
   });
 
   test("createErrorBoundary passes through when no serialized error", () => {
@@ -130,14 +132,15 @@ describe("Error Boundary Hydration", () => {
             return `fallback: ${err().message}`;
           }
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
     // Initially shows fallback from serialized error
-    expect(result).toBe("fallback: server error");
+    expect(result()).toBe("fallback: server error");
     expect(resetFn).toBeDefined();
 
     // After reset, the real fn should run
@@ -145,6 +148,101 @@ describe("Error Boundary Hydration", () => {
     resetFn!();
     flush();
     expect(read()).toBe("recovered content");
+  });
+
+  test("createErrorBoundary hydrated in its error state recovers when its inputs change (#4273)", () => {
+    startHydration({ t0: new Error("item 4 not found") });
+
+    const [sel, setSel] = coreSignal(4);
+    let read!: () => unknown;
+    createRoot(
+      () => {
+        read = createErrorBoundary(
+          () => {
+            if (sel() === 4) throw new Error(`item ${sel()} not found`);
+            return `item ${sel()}`;
+          },
+          (err: any) => `fallback: ${err().message}`
+        );
+        read();
+      },
+      { id: "t" }
+    );
+    flush();
+    expect(read()).toBe("fallback: item 4 not found");
+
+    stopHydration();
+    flush();
+    expect(read()).toBe("fallback: item 4 not found");
+
+    setSel(3);
+    flush();
+    expect(read()).toBe("item 3");
+  });
+
+  test("createErrorBoundary hydrated from a server error holds the client's own error (#4273)", () => {
+    startHydration({ t0: new Error("server error") });
+
+    let fails = true;
+    const seen: unknown[] = [];
+    let read!: () => unknown;
+    let resetFn!: () => void;
+    createRoot(
+      () => {
+        read = createErrorBoundary(
+          () => {
+            if (fails) throw new Error("client error");
+            return "recovered";
+          },
+          (err: any, reset) => {
+            resetFn = reset;
+            seen.push(err());
+            return `fallback: ${err().message}`;
+          }
+        );
+        read();
+      },
+      { id: "t" }
+    );
+    flush();
+    // The content's own run in the hydration pass throws: the boundary holds
+    // the client error, and the fallback receives it.
+    expect(read()).toBe("fallback: client error");
+    expect((seen[seen.length - 1] as Error).message).toBe("client error");
+
+    // reset() clears the client error.
+    stopHydration();
+    fails = false;
+    resetFn();
+    flush();
+    expect(read()).toBe("recovered");
+  });
+
+  test("createErrorBoundary content that runs clean keeps the server's fallback until the content re-runs (#4273)", () => {
+    startHydration({ t0: new Error("server error") });
+
+    const [label, setLabel] = coreSignal("client");
+    let read!: () => unknown;
+    createRoot(
+      () => {
+        read = createErrorBoundary(
+          () => label(),
+          (err: any) => `fallback: ${err().message}`
+        );
+        read();
+      },
+      { id: "t" }
+    );
+    flush();
+    expect(read()).toBe("fallback: server error");
+
+    stopHydration();
+    flush();
+    expect(read()).toBe("fallback: server error");
+
+    setLabel("changed");
+    flush();
+    expect(read()).toBe("changed");
   });
 
   test("createErrorBoundary handles non-Error serialized values", () => {
@@ -158,13 +256,14 @@ describe("Error Boundary Hydration", () => {
           () => "children content",
           (err: any) => `fallback: ${err()}`
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
-    expect(result).toBe("fallback: string error");
+    expect(result()).toBe("fallback: string error");
   });
 
   test("Errored component reads serialized error during hydration", () => {
@@ -264,13 +363,14 @@ describe("Error Boundary Hydration", () => {
           },
           (err: any) => `outer-fallback: ${err().message}`
         );
-        result = read();
+        result = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
-    expect(result).toBe("outer-fallback: outer error");
+    expect(result()).toBe("outer-fallback: outer error");
   });
 
   test("ID alignment: boundary after memo during hydration", () => {
@@ -287,16 +387,17 @@ describe("Error Boundary Hydration", () => {
           () => "children",
           (err: any) => `fallback: ${err().message}`
         );
-        boundaryResult = read();
+        boundaryResult = read;
       },
       { id: "t" }
     );
     flush();
+    // The display settles in the flush after creation (#4273).
 
     // Memo should have loaded serialized value 42 (not computed 99)
     expect(memoResult).toBe(42);
     // Boundary should have loaded serialized error
-    expect(boundaryResult).toBe("fallback: boundary error");
+    expect(boundaryResult()).toBe("fallback: boundary error");
   });
 
   test("Errored shows async rejection fallback after Loading resolves during hydration", async () => {
@@ -2493,6 +2594,61 @@ describe("live-branded sources — automatic takeover", () => {
     uninstall();
   });
 
+  test("from(subscription) is live: adopts the server value, then resubscribes after hydration", async () => {
+    startHydration({ t0: { v: "server-current", s: 1 } });
+    const log: string[] = [];
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(() =>
+          from<string>(next => {
+            log.push("subscribe");
+            next("live-current");
+            return () => log.push("unsubscribe");
+          })
+        );
+      },
+      { id: "t" }
+    );
+    flush();
+    // The adoption trace builds the iterable but never subscribes.
+    expect(result()).toBe("server-current");
+    expect(log).toEqual([]);
+
+    stopHydration();
+    flush();
+    await new Promise(r => setTimeout(r, 10));
+    flush();
+    expect(result()).toBe("live-current");
+    expect(log).toEqual(["subscribe"]);
+  });
+
+  test("from(asyncIterable) is a plain stream: adopt-and-latch, no takeover", async () => {
+    startHydration({ t0: { v: "server-value", s: 1 } });
+    let opened = 0;
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(() =>
+          from({
+            [Symbol.asyncIterator]() {
+              opened++;
+              return { next: () => Promise.resolve({ done: false, value: "client-value" }) };
+            }
+          })
+        );
+      },
+      { id: "t" }
+    );
+    flush();
+    stopHydration();
+    flush();
+    await new Promise(r => setTimeout(r, 10));
+    flush();
+    expect(result()).toBe("server-value");
+    expect(opened).toBe(0);
+  });
+
   test("unbranded computes keep adopt-and-latch semantics — no takeover", async () => {
     startHydration({ t0: { v: "server-value", s: 1 } });
 
@@ -4541,7 +4697,7 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     expect(memo()).toBe(99);
   });
 
-  test("rejected _fr resumes without hydrating serialized children", async () => {
+  test("rejected _fr resumes fresh, adopting serialized children", async () => {
     let rejectFr!: (e: any) => void;
     const frPromise: any = new Promise<boolean>((_, rej) => (rejectFr = rej));
     frPromise.s = 0;
@@ -4583,7 +4739,8 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     await new Promise<void>(r => setTimeout(r, 50));
     flush();
 
-    expect(memo()).toBe(0);
+    // Fresh DOM, but the server's answer is used: hydration never refetches.
+    expect(memo()).toBe(7);
   });
 
   test("_fr with assets waits for both fragment and assets", async () => {
@@ -4655,7 +4812,9 @@ describe("Loading boundary: fragment registration channel (_fr)", () => {
     flush();
 
     expect(typeof result).toBe("function");
-    expect(result()).toBe("fallback-sync");
+    // The "$$f" route is a loading boundary whose content waits on the
+    // resume: its accessor serves the hydrated fallback (#4286).
+    expect(result()()).toBe("fallback-sync");
   });
 
   test("_fr channel isolation: sibling boundaries with distinct root IDs", async () => {
@@ -4887,5 +5046,132 @@ describe("adoption trace — Promise statics", () => {
 
     expect(result).toBe("server");
     expect(callback).not.toHaveBeenCalled();
+  });
+
+  // #4013: a loader building its promise from the global Promise (Vite's
+  // __vitePreload does) gets the trace's never-settling stub when preload()
+  // runs inside a traced compute. lazy() must not keep that stub as the
+  // module load, or every later preload()/render waits on it forever.
+  test("lazy().preload() after hydration settles when first called under the trace (#4013)", async () => {
+    startHydration({ t0: { s: 1, v: "ready" } });
+
+    const Lazy = lazy(
+      () => new Promise<any>(resolve => setTimeout(() => resolve({ default: () => "ok" }), 0))
+    );
+    let result: any;
+    createRoot(
+      () => {
+        result = createMemo(async () => {
+          await Lazy.preload();
+          return "ready";
+        })();
+      },
+      { id: "t" }
+    );
+    flush();
+    stopHydration();
+    expect(result).toBe("ready");
+
+    const settled = await Promise.race([
+      Lazy.preload().then(mod => mod.default({})),
+      new Promise(r => setTimeout(() => r("timeout"), 50))
+    ]);
+    expect(settled).toBe("ok");
+  });
+
+  test("lazyModule() after hydration settles when first called under the trace (#4013)", async () => {
+    startHydration({ t0: { s: 1, v: "ready" } });
+
+    const mod = lazyModule(
+      () => new Promise<any>(resolve => setTimeout(() => resolve({ value: "ok" }), 0))
+    );
+    createRoot(
+      () => {
+        createMemo(async () => {
+          await mod();
+          return "ready";
+        })();
+      },
+      { id: "t" }
+    );
+    flush();
+    stopHydration();
+
+    const settled = await Promise.race([
+      mod().then(m => m.value),
+      new Promise(r => setTimeout(() => r("timeout"), 50))
+    ]);
+    expect(settled).toBe("ok");
+    expect(mod.peek()).toEqual({ value: "ok" });
+  });
+});
+
+describe("seedless derived stores — hydration (#3194)", () => {
+  afterEach(() => {
+    stopHydration();
+  });
+
+  test("createProjection(fn) adopts the serialized snapshot", () => {
+    startHydration({ t0: { v: { name: "server", count: 42 }, s: 1 } });
+
+    let store: any;
+    createRoot(
+      () => {
+        store = createProjection(() => ({ name: "client", count: 999 }));
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(store.name).toBe("server");
+    expect(store.count).toBe(42);
+  });
+
+  test("createStore(fn) runs fn when no serialized data", () => {
+    startHydration({});
+
+    let store: any;
+    createRoot(
+      () => {
+        [store] = createStore(() => ({ name: "computed", count: 7 }));
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect(store.name).toBe("computed");
+    expect(store.count).toBe(7);
+  });
+
+  test("hybrid generator: the snapshot, then later yields as complete records", async () => {
+    startHydration({ t0: { v: { step: 1, label: "first" }, s: 1 } });
+
+    let store: any;
+    const gate = deferred();
+    createRoot(
+      () => {
+        store = createProjection(
+          async function* () {
+            yield { step: 1, label: "first" };
+            await gate.promise;
+            yield { step: 2 } as { step: number; label?: string };
+          },
+          undefined,
+          { ssrSource: "hybrid" }
+        );
+      },
+      { id: "t" }
+    );
+    flush();
+
+    expect({ ...store }).toEqual({ step: 1, label: "first" });
+
+    stopHydration();
+    await tick();
+    expect({ ...store }).toEqual({ step: 1, label: "first" });
+
+    gate.resolve();
+    await tick();
+    expect({ ...store }).toEqual({ step: 2 });
   });
 });

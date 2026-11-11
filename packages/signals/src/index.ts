@@ -38,6 +38,19 @@ export {
  * outside dev builds.
  */
 export { setConsoleFooter } from "./core/index.js";
+/** @internal The verdict windows' read (core.ts): non-null while a `latest()` or `isPending()` window is open — solid-js's narrowed accessors (#4648). */
+export { verdict } from "./core/index.js";
+/** @internal The flush round counter (scheduler.ts): hydration's served pass tells its own round from a later one. */
+export { clock } from "./core/index.js";
+/** @internal Dev duplicate-copy check: solid-js marks components and context reads. */
+export { runAsSolidCopy, checkForeignOwnerless } from "./core/copies.js";
+/** @internal Dev CAUGHT_REACTIVE_READ (D-42): a runtime catch of a reactive read's throw — solid-js's hydration trace and warm-up — is not a user catch. A no-op outside dev builds. */
+export { forgetThrownRead } from "./core/dev.js";
+/** @internal The pre-write hook (`setWriteHook` in core/core.ts); the server-components client's deferred hydration. */
+/** @internal Plain-signal identities and the dev read watch (dependency edges; the server-components client). */
+export { setWriteHook, setSignalIdentities, setReadWatch, signalName } from "./core/index.js";
+/** @internal Store dependency edges: the name a store proxy's writes go by (the server-components client). */
+export { storeName } from "./store/edges.js";
 import { DEV as _DEV, OBSERVE as _OBSERVE, type Dev, type Observe } from "./core/index.js";
 /**
  * Observe tier (diagnostics channel, attribution hook slot + interaction
@@ -95,6 +108,7 @@ export {
   resolve,
   until,
   onSettled,
+  onFlush,
   onCleanup
 } from "./signals.js";
 export type {
@@ -115,6 +129,8 @@ export type {
 export { mapArray, repeat, type Maybe } from "./map.js";
 export * from "./store/index.js";
 export { affects } from "./affects.js";
+export { createDeferred } from "./deferred.js";
+export { from, type FromSource } from "./from.js";
 export { flatten } from "./flatten.js";
 export { createLoadingBoundary, createErrorBoundary } from "./boundaries.js";
 export { createRevealOrder, type RevealOrder } from "./reveal.js";

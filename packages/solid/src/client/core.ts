@@ -1,6 +1,7 @@
 import {
   createMemo,
   createRoot,
+  checkForeignOwnerless,
   getOwner,
   untrack,
   setContext,
@@ -18,6 +19,11 @@ import { FlowComponent, FlowProps } from "./component.js";
 // attribution). Dev builds set both; observe builds set only IS_OBSERVE;
 // prod neither. IS_DEV implies IS_OBSERVE.
 export const IS_DEV = "_SOLID_DEV_" as string | boolean;
+
+/** @internal Dev: an ownerless component or context read while another copy of Solid is running (see @solidjs/signals core/copies.ts). */
+export function checkForeignCopy(): void {
+  if (!getOwner()) checkForeignOwnerless();
+}
 export const IS_OBSERVE = "_SOLID_OBSERVE_" as string | boolean;
 /**
  * Brand symbol marking dev-built components for `solid-devtools` /
@@ -26,6 +32,16 @@ export const IS_OBSERVE = "_SOLID_OBSERVE_" as string | boolean;
  * @internal
  */
 export const $DEVCOMP = Symbol(IS_DEV ? "COMPONENT_DEV" : 0);
+
+/**
+ * Observe: stamps `flight` with when its work started — `from`'s start, or
+ * now — so a reader that meets it later isn't read as a waterfall link (see
+ * `OBSERVE.attribution.markFlight`). Call sites gate on `IS_OBSERVE`.
+ */
+export function markFlight(flight: object, from?: object): void {
+  const slot = OBSERVE!.attribution;
+  slot.markFlight(flight, from && slot.flightOrigin(from));
+}
 
 // Magic type that when used at sites where generic types are inferred from, will prevent those sites from being involved in the inference.
 // https://github.com/microsoft/TypeScript/issues/14829
@@ -61,6 +77,11 @@ export interface Context<T> extends ContextProviderComponent<T> {
  *   narrow case of contexts whose value is a primitive with a meaningful
  *   static fallback (theme, locale, frozen config). Outside any Provider,
  *   `useContext` returns `defaultValue`.
+ *
+ * `undefined` means "not provided": `createContext(undefined)` is still the
+ * default-less form, and a Provider passing `value={undefined}` counts as no
+ * Provider. For an optional context use `null` as the empty value:
+ * `createContext<T | null>(null)`.
  *
  * Context is for state that belongs to a subtree, which includes app-wide
  * state in an app that renders on the server: a value created inside a
@@ -105,18 +126,32 @@ export interface Context<T> extends ContextProviderComponent<T> {
  * }
  * ```
  *
- * @description https://docs.solidjs.com/reference/component-apis/create-context
+ * @description https://v2.solidjs.com/reference/solid-js/components-context/create-context
  */
 export function createContext<T>(defaultValue?: T, options?: EffectOptions): Context<T> {
   const id = Symbol((options && options.name) || "");
+  // No owner of its own: the value goes on the two memos that resolve the
+  // children, set on each one's first pass (`p` is undefined only then; a
+  // repeat on a falsy value is harmless). The inner memo runs the children
+  // getter; the outer flattens, calling function children in scope. Both
+  // are needed: one memo would re-create every child whenever a nested
+  // accessor changed.
   function provider(props: FlowProps<{ value: unknown }>) {
-    return createRoot(() => {
-      setContext(provider, props.value);
-      return children(() => props.children);
+    const value = props.value;
+    const c = createMemo((p: unknown) => (p || setContext(provider, value), props.children), {
+      lazy: true
+    });
+    return createMemo((p: unknown) => (p || setContext(provider, value), flatten(c())), {
+      lazy: true,
+      sync: true
     });
   }
   provider.id = id;
   provider.defaultValue = defaultValue;
+  // Dev: an explicit `undefined` default is still no default (`undefined`
+  // means "not provided"); remembered so a failed read can say so (#4181).
+  if (IS_DEV && arguments.length && defaultValue === undefined)
+    (provider as any)._undefinedDefault = true;
   return provider as unknown as Context<T>;
 }
 
@@ -150,9 +185,10 @@ export function createContext<T>(defaultValue?: T, options?: EffectOptions): Con
  * }
  * ```
  *
- * @description https://docs.solidjs.com/reference/component-apis/use-context
+ * @description https://v2.solidjs.com/reference/solid-js/components-context/use-context
  */
 export function useContext<T>(context: Context<T>): T {
+  if (IS_DEV) checkForeignCopy();
   return getContext(context);
 }
 
@@ -176,7 +212,7 @@ export type ChildrenReturn = Accessor<ResolvedChildren> & { toArray: () => Resol
  * }
  * ```
  *
- * @description https://docs.solidjs.com/reference/component-apis/children
+ * @description https://v2.solidjs.com/reference/solid-js/components-context/children
  */
 export function children(fn: Accessor<SolidElement>): ChildrenReturn {
   // `fn` is the user's children expression — may resolve to async values, so
@@ -238,7 +274,12 @@ export interface ComponentRecord<P = unknown> {
   task: ConsoleTask | undefined;
 }
 
-export function observedComponent<P, V>(Comp: (props: P) => V, props: P, name?: string): V {
+export function observedComponent<P, V>(
+  Comp: (props: P) => V,
+  props: P,
+  name?: string,
+  loc?: string
+): V {
   // A JSX tag whose component resolved to a non-function otherwise surfaces
   // as `Cannot read properties of undefined (reading 'name')` from inside the
   // dev build — a framework-shaped stack for an app-shaped mistake (#3005).
@@ -258,8 +299,11 @@ export function observedComponent<P, V>(Comp: (props: P) => V, props: P, name?: 
       // signals observe layer reads for owner names (reserved from property
       // mangling there for exactly this write) — so diagnostics locate scopes
       // by component and an owned-scope write in a component body reports
-      // "(in <TodoRow>)".
+      // "(in <TodoRow>)". The JSX site rides beside it in the `_loc` slot
+      // (reserved the same way): the fallback location of every finding
+      // raised under this component that has no closer one.
       owner._name = label;
+      owner._loc = loc;
       if (IS_DEV) {
         // The JSX site as a console task (Chrome's async stack tagging):
         // an observer that later reports on this component's nodes — the

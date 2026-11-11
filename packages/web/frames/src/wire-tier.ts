@@ -21,11 +21,19 @@
  * `cancel` / `done`, the open-frame count the end is judged by, the sweep
  * the loop may run), the have-list ledger per mount (`have` keeps it off
  * the frame's applied content records, `haveOf` reads it) and the resume
- * request (`resume` + `encodeHaveList`). The eager client keeps the
- * dispatch alone: `handle`'s `LIVE_WIRE` arm awaits the load and hands
+ * request (`resume` + `encodeHaveList`), the range morph (`morph` for a
+ * frame's new root over its content, `graft`), and the live content appliers:
+ * `hole` morphs a live hole's marked range (row ops included) and `attrs`
+ * patches an addressed element, both found through the mount's target
+ * cache. A hole or attr record that lands while this chunk loads stays
+ * pending in the frame's store, and the install's flush applies it; the
+ * server announces the tier wherever it opens a live hole binding. The
+ * eager client keeps the dispatch alone: `handle`'s `LIVE_WIRE` arm awaits the load and hands
  * over, `bump` asks the resident module to cancel, the frame's
- * `#recordHave` hands each applied record to `have`, and `resume` answers
- * through the resident module or not at all.
+ * `#recordHave` hands each applied record to `have`, the frame's flush
+ * hands each hole / attr record to `hole` / `attrs` with its mount
+ * (`#live`), and `resume` answers through the resident module or not at
+ * all.
  *
  * Preload-at-call (plan §1, the wire row): `live()`'s decorator fires the
  * handler's `onLive` hook at the call — before its first fetch — and the
@@ -53,7 +61,7 @@
 import { applyFrameResponse } from "./client.js";
 // The transport's have-list header name and budget — two literals, bundled
 // (the client entry stops exporting them: frames residue pass, residue 1).
-import { FRAME_HAVE_BUDGET, FRAME_HAVE_HEADER } from "./frame-transport.js";
+import { FRAME_HAVE_BUDGET, FRAME_HAVE_HEADER, ends } from "./frame-transport.js";
 // The server-function wire layer — the SHARED built instance (external:
 // rollup.config.js's externalizeSharedTransport resolves this to
 // `@solidjs/web/server-functions/client`).
@@ -64,7 +72,38 @@ import {
   isEventStream
 } from "../../server-functions/src/shared.js";
 
+// Pure DOM helpers and marker constants, bundled into this chunk as their
+// own copy (no module state).
+import {
+  isFrameElement,
+  parseFragment,
+  preservesOpen,
+  rangeClose,
+  FRAME_ID_ATTR
+} from "./frame-client.js";
+// The range morph (frame-morph.ts), bundled into this chunk.
+import { morphAttributes, reconcileChildren } from "./frame-morph.js";
+
 import type { FrameHost, FrameHostOptions } from "./frame-client.js";
+
+/**
+ * A frame's mount as the live appliers reach it (the frame's `#live`):
+ * `e` its element, `t` its live-target cache, `c` its claim, `k` its slot
+ * index builder, `s` what each hole's range shows, `x` the give-up for a row-op record (mark it spent,
+ * cancel the connection so the resume re-sends the hole whole); `w`, in
+ * dev builds only, the diagnostic for a hole whose closing comment is gone
+ * (this chunk is built once for every condition, so the gate is the eager
+ * client's).
+ */
+interface LiveMount {
+  e: Element;
+  t: Map<string, Node>;
+  c: unknown;
+  k(found: Map<string, any>): void;
+  s(): Record<string, string>;
+  x(key: string, record: unknown): void;
+  w?: false | ((marker: string, open: Node) => void);
+}
 
 /**
  * The host the handler hands over: the frame host, carrying the lazily
@@ -292,8 +331,7 @@ export function connect(
     apply(chunk: any) {
       if (drained) return;
       if (chunk.type === "start") open.set(chunk.id, chunk.version);
-      else if (chunk.type === "complete" || (chunk.type === "error" && !chunk.key))
-        open.delete(chunk.id);
+      else if (ends(chunk)) open.delete(chunk.id);
       host.apply(chunk);
     }
   };
@@ -314,15 +352,20 @@ export function connect(
     const dead = error || cancelled || new Error("Frame stream ended before the frame completed.");
     connection.done = true;
     resolveEnd({
-      open: open.size,
+      // A cancel is always a death the loop reconnects from (supersession,
+      // or a mount giving up on a row-op record so the resume re-sends the
+      // hole whole), even when it lands before the body's `start` did: a
+      // remount replaying a warm store gives up as its new connection is
+      // still at the header, and an end with nothing open would read as
+      // completion, leaving the mount with no live connection at all.
+      open: cancelled !== undefined ? Math.max(open.size, 1) : open.size,
       error: dead,
       sweep: () => {
         for (const [id, version] of open)
           host.apply({
-            type: "error",
             id,
             version,
-            error: { message: String(dead && dead.message) }
+            r: { ":error": { message: String(dead && dead.message) } }
           });
       },
       close: () => {}
@@ -339,3 +382,322 @@ export function connect(
   });
   return binding;
 }
+
+/**
+ * Apply a live `For` hole's row ops (#4064) to its range `open`…`close`:
+ * truncate to `ops.n` rows, morph each changed row's range in place, and
+ * append new rows before `close`. A row is everything from its
+ * `<!--lr-->` marker to the next one (or `close`); a nested live hole's
+ * range is skipped whole. Every changed row parses in ONE fragment, split
+ * back at the markers. `morph` is the frame's range reconcile. Returns
+ * false, having changed nothing, when the range doesn't hold rows the ops
+ * can address — the caller then morphs the whole range.
+ * @internal
+ */
+function rows(
+  open: Node,
+  close: Node,
+  ops: { n: number; r: ([number, string] | [number, any[], number?])[] },
+  parse: (html: string) => DocumentFragment,
+  morph: (start: Node, end: Node, fragment: DocumentFragment) => void,
+  claim?: any
+): boolean {
+  const isRow = (n: Node) => n.nodeType === 8 && (n as Comment).data === "lr";
+  const starts: Node[] = [];
+  for (let n = open.nextSibling; n && n !== close; n = n.nextSibling) {
+    if (isRow(n)) starts.push(n);
+    else if (n.nodeType === 8 && /^lh:\d+$/.test((n as Comment).data)) {
+      const end = "lh:/" + (n as Comment).data.slice(3);
+      while (n.nextSibling && !(n.nodeType === 8 && (n as Comment).data === end)) n = n.nextSibling;
+    }
+  }
+  const had = starts.length;
+  const n = ops.n;
+  // Appends must cover every new index; a range without rows is not a list.
+  let appended = 0;
+  for (const [i] of ops.r) if (i >= had) appended++;
+  if (!had || appended !== Math.max(0, n - had)) return false;
+  // Row patches: resolve every patched row's elements first, so a row that
+  // doesn't show the structure its patch was taken against fails the whole
+  // op before anything is written.
+  const rowEnd = (i: number) => (i + 1 < Math.min(n, had) ? starts[i + 1] : close);
+  const patched: (Element[] | null)[] = [];
+  let html = "";
+  let whole = 0;
+  for (const op of ops.r) {
+    if (typeof op[1] === "string") {
+      html += "<!--lr-->" + op[1];
+      whole++;
+      patched.push(null);
+      continue;
+    }
+    if (op[0] >= had) return false;
+    const els = rowElements(starts[op[0]], rowEnd(op[0]), op[2]);
+    if (!els) return false;
+    for (const edit of op[1]) if (edit[0] >= els.length) return false;
+    patched.push(els);
+  }
+  const parsed: DocumentFragment[] = [];
+  if (whole) {
+    const fragment = parse(html);
+    for (let c = fragment.firstChild; c; ) {
+      const next = c.nextSibling;
+      if (isRow(c)) parsed.push(document.createDocumentFragment());
+      else parsed[parsed.length - 1].appendChild(c);
+      c = next;
+    }
+    if (parsed.length !== whole) return false;
+  }
+  const parent = open.parentNode!;
+  // Truncate: everything from the first dropped row's marker to `close`.
+  if (n < had) while (starts[n].nextSibling !== close) parent.removeChild(close.previousSibling!);
+  if (n < had) parent.removeChild(starts[n]);
+  let k = 0;
+  ops.r.forEach((op, j) => {
+    const i = op[0];
+    const els = patched[j];
+    if (els) return patchRow(starts[i], rowEnd(i), els, op[1] as any[], claim);
+    const fragment = parsed[k++];
+    if (i < had) morph(starts[i], rowEnd(i), fragment);
+    else {
+      const marker = document.createComment("lr");
+      parent.insertBefore(marker, close);
+      parent.insertBefore(fragment, close);
+    }
+  });
+  return true;
+}
+
+/** A row's elements in document order, or null when the row holds a live
+ *  hole's markers (its text runs would not line up with the server's) or,
+ *  given a dev server's `shape` (see `rowPatch` in the server), its element
+ *  tree hashes to something else. */
+function rowElements(start: Node, end: Node, shape?: number): Element[] | null {
+  const els: Element[] = [];
+  let h = 0x811c9dc5;
+  const walk = (n: Node | null, stop: Node | null, parent: number): boolean => {
+    for (; n && n !== stop; n = n.nextSibling) {
+      if (n.nodeType === 8 && /^lh:/.test((n as Comment).data)) return false;
+      if (n.nodeType !== 1) continue;
+      const el = els.length;
+      if (shape !== undefined) {
+        const tag = (n as Element).localName;
+        for (let i = 0; i < tag.length; i++) h = Math.imul(h ^ (tag.charCodeAt(i) | 32), 16777619);
+        h = Math.imul(h ^ (parent + 2), 16777619);
+      }
+      els.push(n as Element);
+      if (!walk(n.firstChild, null, el)) return false;
+    }
+    return true;
+  };
+  if (!walk(start.nextSibling, end, -1)) return null;
+  if (shape !== undefined && h >>> 0 !== shape) {
+    console.error(
+      "A live row's markup doesn't parse to the elements the server rendered (invalid HTML nesting?); the row was re-sent whole.",
+      start.nextSibling
+    );
+    return null;
+  }
+  return els;
+}
+
+// An attribute area as the morph reads a source element: the server's
+// double-quoted, attribute-escaped text scans exactly; anything else (an
+// unquoted or single-quoted value, an entity beyond the escaper's own)
+// goes through the parser. Names fold to lower case as the HTML parser
+// folds them (the server ships foreign elements' attribute changes whole).
+const ATTR = /\s([^\s=/>"']+)(?:="([^"]*)")?/g;
+const ATTR_ENTITY = /&(?:amp|lt|gt|quot|#39);/g;
+const ATTR_ENTITIES: Record<string, string> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'"
+};
+function attrArea(text: string): any {
+  if (/=[^"]/.test(text) || text.replace(ATTR_ENTITY, "").includes("&"))
+    return parseFragment(`<i${text}></i>`).firstChild;
+  const attributes: { name: string; value: string }[] = [];
+  const names = new Set<string>();
+  for (const m of text.matchAll(ATTR)) {
+    const value = m[2] === undefined ? "" : m[2].replace(ATTR_ENTITY, e => ATTR_ENTITIES[e]);
+    const name = m[1].toLowerCase();
+    attributes.push({ name, value });
+    names.add(name);
+  }
+  return { attributes, hasAttribute: (name: string) => names.has(name) };
+}
+
+/** Write a row patch (see `rowPatch` in the server): attribute areas the
+ *  way the morph matches them, text runs in place. */
+function patchRow(start: Node, end: Node, els: Element[], patch: any[], claim: any) {
+  for (const op of patch) {
+    const el = op[0] < 0 ? null : els[op[0]];
+    if (el && el.closest("[data-preserve]")) continue;
+    if (op.length === 2) {
+      morphAttributes(el, attrArea(op[1]), claim);
+      continue;
+    }
+    // The text run before the `slot`-th non-text child.
+    let seen = 0;
+    let at: Node | null = el ? el.firstChild : start.nextSibling;
+    const stop = el ? null : end;
+    let text: Text | null = null;
+    for (; at && at !== stop; at = at.nextSibling) {
+      if (at.nodeType === 3) {
+        if (seen === op[1]) {
+          text = at as Text;
+          break;
+        }
+      } else if (seen++ === op[1]) break;
+    }
+    if (text) text.data = op[2];
+    else if (op[2]) (el || start.parentNode!).insertBefore(document.createTextNode(op[2]), at);
+  }
+}
+
+/**
+ * Morph a live hole's marked range (`<!--lh:N-->…<!--lh:/N-->`, marker =
+ * `lh:N`) to its re-emitted html — the client half of the Stage 3 hole
+ * ledger. The same range-anchored reconcile as the root morph, so
+ * interior element identity (focus, media, third-party widget state)
+ * survives value ticks. A hole's content may hold slot ranges: the morph
+ * then resolves them against the frame's displaced-range index (`index`,
+ * one per flush pass: `r` the slot ranges by occurrence, `g` the subtrees
+ * the morphs inserted whole), as the root's does, so an occurrence the new
+ * content still has keeps its range — interior and mounted state —
+ * wherever it moved; the sync after the pass mounts the new ones and
+ * unmounts the ones gone. Returns whether the markers were found and the
+ * morph ran.
+ * @internal
+ */
+export function hole(
+  f: LiveMount,
+  marker: string,
+  record: any,
+  index: { r?: Map<string, any>; g?: Node[] }
+): boolean {
+  const open = target(f, "hole:" + marker, n => n.nodeType === 8 && (n as Comment).data === marker);
+  if (!open) return false;
+  const close = rangeClose(open, "lh:/" + marker.slice(3));
+  if (!close) {
+    f.w && f.w(marker, open);
+    return false;
+  }
+  if (record.rows) {
+    // Row ops (#4064): only the rows that changed, applied where the range
+    // shows the emission they were taken against. Anywhere else (a fresh
+    // mount replaying the store, a record that landed on one that never
+    // applied) the live connection resumes, its have-list naming what the
+    // range shows, and the hole comes back whole.
+    if (
+      f.s()[marker] !== record.base ||
+      !rows(
+        open,
+        close,
+        record.rows,
+        parseFragment,
+        (start, end, fragment) => reconcileChildren(start.parentNode!, fragment, start, end, f.c),
+        f.c
+      )
+    ) {
+      // Once: the record is spent, the resume re-sends the hole whole.
+      f.x("hole:" + marker, record);
+      return false;
+    }
+  } else {
+    // One index for the pass: a range one hole drops may be the one
+    // another hole now places. A frame with no slot range needs none.
+    if (!index.r) (f.k((index.r = new Map())), (index.g = []));
+    reconcileChildren(
+      open.parentNode!,
+      parseFragment(record.value),
+      open,
+      close,
+      f.c,
+      index.r.size ? index.r : null,
+      index.g
+    );
+  }
+  return true;
+}
+
+/**
+ * Apply a live attr-hole re-emission: find the element addressed
+ * `data-lha="addr"` in the frame's range, parse the rebuilt attribute
+ * text through a scratch element (native entity decoding), and patch the
+ * element to match it the way the root morph matches server output
+ * (`morphAttributes`): set what's present, remove what is not — the text
+ * is the tag's WHOLE attribute area, so a name absent from it has
+ * vanished on the server, whether or not the emission names it in
+ * `removed` (a resume's re-emission cannot: the server holds the client's
+ * previous text only as a digest). The address itself and a
+ * `<details>`/`<dialog>` `open` are the morph's exceptions here too.
+ * Returns false when the element isn't in the DOM yet (pending; later
+ * flushes retry).
+ * @internal
+ */
+export function attrs(f: LiveMount, addr: string, record: any): boolean {
+  const el = target(
+    f,
+    "attr:" + addr,
+    n => n.nodeType === 1 && (n as Element).getAttribute("data-lha") === addr
+  ) as Element | null;
+  if (!el) return false;
+  const parsed = parseFragment(`<i${record.value}></i>`).firstChild as Element | null;
+  const keepOpen = preservesOpen(el);
+  const current = el.attributes;
+  for (let i = current.length - 1; i >= 0; i--) {
+    const name = current[i].name;
+    if (name === "data-lha" || (keepOpen && name === "open")) continue;
+    if (!parsed || !parsed.hasAttribute(name)) el.removeAttribute(name);
+  }
+  if (parsed) {
+    for (let i = 0; i < parsed.attributes.length; i++) {
+      const { name, value } = parsed.attributes[i];
+      if (keepOpen && name === "open") continue;
+      if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+    }
+  }
+  if (record.removed)
+    for (const name of record.removed) {
+      if (keepOpen && name === "open") continue;
+      el.removeAttribute(name);
+    }
+  return true;
+}
+
+/** A live target: the cached node while it is still this frame's and
+ *  still matches, else a fresh search (cached when found). */
+function target(f: LiveMount, key: string, test: (n: Node) => boolean): Node | null {
+  let n: Node | null | undefined = f.t.get(key);
+  if (n && test(n) && f.e.contains(n)) return n;
+  n = findTarget(f.e.firstChild, test);
+  n && f.t.set(key, n);
+  return n;
+}
+
+/**
+ * Depth-first search among `n` and its next siblings for a live-hole
+ * target — an open comment (`<!--lh:N-->`) or an addressed element
+ * (`data-lha`), matched by `test`. Descends through elements — including
+ * region elements, whose holes belong to the stream that produced them (one
+ * id counter per response) — but never into nested boundary frames (bare
+ * ids): those are separate streams with their own hole/address namespaces.
+ */
+function findTarget(n: Node | null, test: (n: Node) => boolean): Node | null {
+  for (; n; n = n.nextSibling) {
+    if (n.nodeType === 1) {
+      const fid = isFrameElement(n) ? (n as Element).getAttribute(FRAME_ID_ATTR) : null;
+      if (fid === null || fid.includes(".")) {
+        if (test(n)) return n;
+        const found = findTarget(n.firstChild, test);
+        if (found) return found;
+      }
+    } else if (test(n)) return n;
+  }
+  return null;
+}
+
+export { graft, morph } from "./frame-morph.js";

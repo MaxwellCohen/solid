@@ -1,3 +1,4 @@
+import { Session } from "node:inspector/promises";
 import {
   createEffect,
   createMemo,
@@ -12,6 +13,7 @@ import {
   latest,
   mapArray
 } from "../src/index.js";
+import { flushTransaction, type Transaction } from "../src/core/scheduler.js";
 
 function gc() {
   return new Promise(resolve =>
@@ -22,6 +24,114 @@ function gc() {
     }, 0)
   );
 }
+
+async function collectGarbage() {
+  // WeakRef targets survive the job that created them.
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  const inspector = new Session();
+  inspector.connect();
+  try {
+    await inspector.post("HeapProfiler.collectGarbage");
+    await inspector.post("HeapProfiler.collectGarbage");
+  } finally {
+    inspector.disconnect();
+  }
+}
+
+it("releases an unobserved pending computation disposed while idle", async () => {
+  flush();
+  const refs = (() => {
+    const payload = { retained: true };
+    let refs!: WeakRef<object>[];
+    const dispose = createRoot(dispose => {
+      refs = [new WeakRef(payload), new WeakRef(getOwner()!), new WeakRef({ control: true })];
+      createMemo(async () => {
+        await new Promise(() => {});
+        return payload;
+      });
+      return dispose;
+    });
+    dispose();
+    return refs;
+  })();
+  await collectGarbage();
+  expect(refs.map(ref => ref.deref())).toEqual([undefined, undefined, undefined]);
+});
+
+it("releases an unobserved reader queued by an idle cross-root rejection", async () => {
+  const source = createRoot(dispose => {
+    let reject!: (reason: unknown) => void;
+    const read = createMemo(() => new Promise<string>((_, fail) => (reject = fail)), {
+      loadingValue: "ready"
+    });
+    return { read, reject, dispose };
+  });
+  try {
+    const refs = await (async () => {
+      const payload = { retained: true };
+      let refs!: WeakRef<object>[];
+      const dispose = createRoot(dispose => {
+        refs = [new WeakRef(payload), new WeakRef(getOwner()!), new WeakRef({ control: true })];
+        createMemo(() => {
+          source.read();
+          return payload;
+        });
+        return dispose;
+      });
+      flush();
+      source.reject(new Error("idle rejection"));
+      await Promise.resolve();
+      dispose();
+      return refs;
+    })();
+    await collectGarbage();
+    expect(refs.map(ref => ref.deref())).toEqual([undefined, undefined, undefined]);
+  } finally {
+    source.dispose();
+  }
+});
+
+it("releases the transaction a latest() read of an unheld refetch opened once it lands", async () => {
+  // F-6, D-23 (#4453): `pendingVerdict` marks the flush's transaction a
+  // `latest` read of an unheld flight opened. It holds nothing of the
+  // flight and lands at that flush's seam — after which nothing may keep it.
+  const asks: ((v: number) => void)[] = [];
+  const [s, setS] = createSignal(1);
+  let armed = false,
+    opened: Transaction | null = null;
+  const dispose = createRoot(dispose => {
+    const m = createMemo(() => {
+      s();
+      return new Promise<number>(resolve => asks.push(resolve));
+    });
+    createRenderEffect(
+      () => {
+        const v = `${latest(m)} ${isPending(m)}`;
+        if (armed) opened ??= flushTransaction;
+        return v;
+      },
+      () => {}
+    );
+    return dispose;
+  });
+  flush();
+  await new Promise<void>(r => setTimeout(r, 0));
+  asks.shift()!(1);
+  await new Promise<void>(r => setTimeout(r, 0));
+  flush();
+  armed = true;
+  setS(2);
+  flush();
+  expect(opened).not.toBeNull();
+  const ref = new WeakRef(opened!);
+  opened = null;
+  asks.shift()!(2);
+  await new Promise<void>(r => setTimeout(r, 0));
+  flush();
+  dispose();
+  await collectGarbage();
+  expect(ref.deref()).toBeUndefined();
+});
 
 if (global.gc) {
   it("should gc computed if there are no observers", async () => {
@@ -73,6 +183,24 @@ if (global.gc) {
     pointer = undefined;
     await gc();
     expect(ref.deref()).toBeUndefined();
+  });
+
+  // #4095: the dispose function must not share createRoot's scope, which
+  // holds `init` — keeping it would keep everything `init` closes over.
+  it("a kept dispose function does not retain the root's init", async () => {
+    let ref!: WeakRef<object>;
+    const dispose = (() => {
+      const payload = {};
+      ref = new WeakRef(payload);
+      return createRoot(dispose => {
+        void payload;
+        return dispose;
+      });
+    })();
+
+    await gc();
+    expect(ref.deref()).toBeUndefined();
+    dispose();
   });
 
   it("should gc effect lazily", async () => {

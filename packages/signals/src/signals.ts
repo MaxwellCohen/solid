@@ -20,27 +20,31 @@ import {
   runWithOwner,
   setMemo,
   setSignal,
+  signalHook,
   signal,
   trackedEffect,
   untrack,
   CONFIG_REDERIVE,
   CONFIG_AUTHORITATIVE
 } from "./core/index.js";
-import { emitDiagnostic, registerGraph, reportDiagnostic } from "./core/dev.js";
+import { emitDiagnostic, forgetThrownRead, registerGraph, reportDiagnostic } from "./core/dev.js";
 import {
   dirtyQueue,
+  flush,
   flushTransaction,
   globalQueue,
   GlobalQueue,
   joinFuture,
   passTx,
   resolveTx,
+  schedule,
   staleReader,
   type Transaction
 } from "./core/scheduler.js";
 import { REACTIVE_JOINED, STATUS_ERROR, STATUS_PENDING } from "./core/constants.js";
 import { unwrapStatusError } from "./core/error.js";
-import { optimisticWrite, truthConfirmed, truthRead } from "./core/lanes.js";
+import { optimisticWrite } from "./core/guesses.js";
+import { truthConfirmed, truthRead } from "./core/truth.js";
 
 /**
  * Low-level reactive-cleanup primitive. Registers a callback that runs when
@@ -181,6 +185,13 @@ export type EffectBundle<Prev, Next extends Prev = Prev> = {
 interface BaseEffectOptions {
   /** Debug name (dev mode only) */
   name?: string;
+  /**
+   * Source location (`file:line:col`, root-relative) written by the
+   * compiler's `sourceNames` `locations` kind beside `name`; dev and observe
+   * builds keep it for console reports and diagnostic events, production
+   * ignores it. Not meant to be written by hand.
+   */
+  loc?: string;
 }
 
 /** Options for effect primitives that support deferring/scheduling their initial run (`createEffect`, `createRenderEffect`, `createReaction`). */
@@ -236,6 +247,13 @@ export interface SignalOptions<T> {
   /** Debug name (dev mode only) */
   name?: string;
   /**
+   * Source location (`file:line:col`, root-relative) written by the
+   * compiler's `sourceNames` `locations` kind beside `name`; dev and observe
+   * builds keep it for console reports and diagnostic events, production
+   * ignores it. Not meant to be written by hand.
+   */
+  loc?: string;
+  /**
    * Custom equality function, or `false` to always notify subscribers.
    * Defaults to reference equality (`isEqual`). Pass a comparator (e.g.
    * `(a, b) => a.id === b.id`) for value-based equality, or `false` to
@@ -258,6 +276,13 @@ export interface MemoOptions<T> {
   id?: string;
   /** Debug name (dev mode only) */
   name?: string;
+  /**
+   * Source location (`file:line:col`, root-relative) written by the
+   * compiler's `sourceNames` `locations` kind beside `name`; dev and observe
+   * builds keep it for console reports and diagnostic events, production
+   * ignores it. Not meant to be written by hand.
+   */
+  loc?: string;
   /**
    * Advanced (integration tier). When true, the memo is invisible to the
    * hydration id scheme: it inherits its parent's id instead of consuming a
@@ -372,7 +397,7 @@ export type NoInfer<T extends any> = [T][T extends any ? 0 : never];
  * setUser({ ...user(), name: "Alice" });
  * ```
  *
- * @description https://docs.solidjs.com/reference/basic-reactivity/create-signal
+ * @description https://v2.solidjs.com/reference/solid-js/reactivity/create-signal
  */
 export function createSignal<T>(): Signal<T | undefined>;
 export function createSignal<T>(value: Exclude<T, Function>, options?: SignalOptions<T>): Signal<T>;
@@ -394,6 +419,7 @@ export function createSignal<T>(
   }
   const node = signal<T>(first as any, second as SignalOptions<T>);
   if (__OBSERVE__) registerGraph(node, getOwner());
+  if (signalHook !== null) signalHook(node);
   return [accessor<T>(node), setSignal.bind(null, node as any) as Setter<T | undefined>];
 }
 
@@ -413,7 +439,7 @@ export function createSignal<T>(
  * const [state, setState] = createOptimistic<T>(fn, options?: SignalOptions<T> & MemoOptions<T>);
  * ```
  *
- * @description https://docs.solidjs.com/reference/basic-reactivity/create-optimistic-signal
+ * @description https://v2.solidjs.com/reference/solid-js/reactivity/create-optimistic
  */
 export function createOptimistic<T>(): Signal<T | undefined>;
 export function createOptimistic<T>(
@@ -469,7 +495,7 @@ export function createOptimistic<T>(
  * });
  * ```
  *
- * @description https://docs.solidjs.com/reference/basic-reactivity/create-memo
+ * @description https://v2.solidjs.com/reference/solid-js/reactivity/create-memo
  */
 // NoInfer keeps the previous-value parameter from influencing T inference, so
 // the memo/effect result type is still driven by the compute return type.
@@ -556,7 +582,7 @@ export function createMemo<T>(
  * );
  * ```
  *
- * @description https://docs.solidjs.com/reference/basic-reactivity/create-effect
+ * @description https://v2.solidjs.com/reference/solid-js/reactivity/create-effect
  */
 export function createEffect<const T>(
   compute: ComputeFunction<undefined | NoInfer<T>, T>,
@@ -610,7 +636,7 @@ export function createEffect<const T>(
  * }
  * ```
  *
- * @description https://docs.solidjs.com/reference/secondary-primitives/create-render-effect
+ * @description https://v2.solidjs.com/reference/solid-js/advanced/specialized-reactivity/create-render-effect
  */
 export function createRenderEffect<const T>(
   compute: ComputeFunction<undefined | NoInfer<T>, T>,
@@ -663,7 +689,7 @@ export function createRenderEffect<const T>(
  * });
  * ```
  *
- * @description https://docs.solidjs.com/reference/secondary-primitives/create-tracked-effect
+ * @description https://v2.solidjs.com/reference/solid-js/advanced/specialized-reactivity/create-tracked-effect
  */
 export function createTrackedEffect(
   compute: () => void | (() => void),
@@ -696,7 +722,7 @@ export function createTrackedEffect(
  * setCount(1); // logs once, reaction re-armed for next change
  * ```
  *
- * @description https://docs.solidjs.com/reference/secondary-primitives/create-reaction
+ * @description https://v2.solidjs.com/reference/solid-js/advanced/specialized-reactivity/create-reaction
  */
 export function createReaction(
   effectFn: EffectFunction<undefined> | EffectBundle<undefined>,
@@ -718,7 +744,12 @@ export function createReaction(
     }
     runWithOwner(owner!, () => {
       effect(
-        () => (tracking(), (arm = getOwner()!)),
+        () => {
+          const node = getOwner()!;
+          arm = node;
+          tracking();
+          return node;
+        },
         node => {
           arm = undefined;
           cl?.();
@@ -777,15 +808,23 @@ function watch<T>(
   // after: the first pass's own error is the promise's rejection.)
   computed(
     () => {
-      let v: T;
+      let v: T,
+        failed = false;
       try {
         v = fn();
       } catch (e) {
         if (e instanceof NotReadyError) throw e;
-        queueMicrotask(() => onError(unwrapStatusError(e)));
-        return;
+        // An error is an answer (D-41): delivered by the same frame rule.
+        // (D-42, dev: the runtime's catch, not a user's.)
+        if (__DEV__) forgetThrownRead();
+        v = unwrapStatusError(e) as T;
+        failed = true;
       }
       const c = getOwner() as Computed<any>;
+      // A truth reader waits out a `createDeferred` flight its value derives
+      // from, which serves everyone else the stale answer (D-40).
+      const lag = config & CONFIG_AUTHORITATIVE && GlobalQueue._lagging?.(c);
+      if (lag) throw new NotReadyError(lag);
       // (Outside a flush a mainline pass joins through `passTx`.)
       const joined = flushTransaction ?? passTx;
       if (
@@ -796,6 +835,7 @@ function watch<T>(
         staleReader(c, resolveTx(joined));
         return;
       }
+      if (failed) return void queueMicrotask(() => onError(v));
       inPass?.(v);
       queueMicrotask(() => onValue(v));
     },
@@ -1191,4 +1231,70 @@ export function onSettled(callback: () => void | (() => void)): void {
           throw new Error(message);
         }
       });
+}
+
+/**
+ * Schedules `callback` to run **once**, right after the pending flush
+ * finishes, in the same microtask checkpoint (before the browser paints).
+ * Unlike `onSettled`, it never waits on async work: if that flush is held by
+ * a pending transition, the callback still runs.
+ *
+ * Its main use is keeping a write out of another update's hold. Writes made
+ * in the same synchronous frame are applied together, so when one of them
+ * starts async work (a route change, a fetch), the others are held with it
+ * until it resolves. A write made in `onFlush` happens after that flush, so
+ * it is its own update: it commits on its own unless something it changes
+ * also derives from the held work (a memo or `createEffect` reading both),
+ * in which case it joins that hold as any later write would.
+ *
+ * Call it from event handlers and effect callbacks (including
+ * `createTrackedEffect` and `onSettled` bodies). In an owned scope such as a
+ * component body or a computation it warns in dev: use `onSettled` there.
+ *
+ * - A write in the callback lands after any write made inline in the same
+ *   frame. Don't write the same signal both inside and outside it; use a
+ *   functional setter if the order matters.
+ * - Several `onFlush` callbacks run in call order, each in its own flush:
+ *   async work one callback starts does not hold another's writes.
+ * - `queueMicrotask` is not a substitute: called before the frame's first
+ *   write, it runs before that flush and its write joins it.
+ *
+ * @example
+ * ```tsx
+ * // A menu closes now even when the consumer's onSelect starts async work.
+ * const select = (id: string) => {
+ *   onFlush(() => setOpen(false));
+ *   props.onSelect?.(id);
+ * };
+ * ```
+ *
+ * @param callback Function to run once after the pending flush
+ */
+export function onFlush(callback: () => void): void {
+  if (__DEV__) {
+    const owner = getOwner();
+    if (owner && !(owner._config & CONFIG_CHILDREN_FORBIDDEN)) {
+      const message =
+        "[ON_FLUSH_IN_OWNED_SCOPE] onFlush called in an owned scope (a component body or a computation). It is meant for event handlers and effect callbacks; to run work after this scope's first stable render, use onSettled.";
+      reportDiagnostic(
+        emitDiagnostic({
+          code: "ON_FLUSH_IN_OWNED_SCOPE",
+          kind: "lifecycle",
+          severity: "warn",
+          message,
+          ownerId: owner.id,
+          ownerName: (owner as any)._name
+        })
+      );
+    }
+  }
+  // The frame's flush is queued (or already draining) ahead of this
+  // microtask, so the callback's writes start a flush of their own. Each
+  // callback flushes before the next runs, so async work one starts never
+  // holds another's writes.
+  schedule();
+  queueMicrotask(() => {
+    callback();
+    flush();
+  });
 }

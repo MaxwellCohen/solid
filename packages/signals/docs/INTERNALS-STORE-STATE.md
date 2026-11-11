@@ -182,7 +182,20 @@ there is nothing to diff.)
   adoption's. A get/has/descriptor read of any other key is served from the
   backing to every reader and is not born holding. Keyless reads (`ownKeys`,
   `$TRACK`, `deep()`), chained backings, optimistic families and a swapped
-  or non-plain prototype hold the whole container.
+  or non-plain prototype hold the whole container. Below the key, the unit
+  is the **leaf** (#3712): a row first read during the hold, which the
+  adoption never paired because nothing had proxied it, is paired at that
+  read as `applyAdopt` would have paired it (`adoptChild`: the family's key
+  for an array row, the key name for a record's; `sameRow` is the one
+  predicate both use) — one target, the old raw its committed frame, the
+  new raw its staging, held by the same transaction — and its own leaves
+  decide. Pairing at read time rather than at the adoption is the design,
+  not a gap: nodes are lazy, the adoption records nothing, and a hold is the
+  rare path, so what a hold asks is answered from the two backings when it
+  is asked. Container → key → leaf is the end of this series; there is no
+  finer unit. Not paired (the hold stands): a shallow family, a reorder (the
+  keys differ), and a `reconcile()` in a plain setter, whose key the target
+  does not carry.
 
 ## 4. Identity rules
 
@@ -193,6 +206,15 @@ there is nothing to diff.)
 - Reconcile/projection preserve *logical* identity for key-matched branches
   (same proxy, keyed flows compare proxy identity); reference-equal unowned
   branches additionally keep raw identity (the skip path).
+- Positional pairing (unkeyed rows, keyless rows of a keyed array, a
+  record's keys) never gives one row two slots of the incoming frame
+  (#4001): a raw that is already a live row keeps it at the slot it moved
+  to, a row whose raw sits at another slot of the incoming frame — the slot
+  its `pk` names, which pairing and that move both write — is not paired
+  again, and a raw left resolving to a row that moved on drops the lookup
+  (it wraps fresh). A move is followed when the row's new slot comes first
+  in the walk; otherwise the row stays at its slot and the moved raw wraps
+  fresh. Values are right either way; only which proxy differs.
 - New objects introduced under a pending lane are wrapped on read like any
   other; on rollback they simply become unreachable.
 
@@ -421,7 +443,11 @@ raw object. Mechanics:
   channel backing swap; subscribers re-read, re-subscribe to the new backing,
   and the old chain drops via dependency rebuild. The displaced backing's
   `storeLookup` registration is superseded at swap (proj R10 — proxy keeps
-  its backing; the *raw→proxy* entry moves).
+  its backing; the *raw→proxy* entry moves). The swap's diff base is the
+  live inner proxy, which already reads the inner store's next frame — a
+  landing in the same flush would diff as unchanged — so a severing writes
+  every node of the target and its container, each node's equality judging
+  it against what it was last told (#4361).
 - **Snapshot through a chain** unwraps backing pointers to the base raw.
   Snapshot identity rule (resolves proj R22 + recon-snap R24/R25 jointly):
   **source identity for unowned subtrees; cached copy for owned subtrees**

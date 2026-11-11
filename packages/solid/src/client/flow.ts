@@ -6,7 +6,8 @@ import {
   repeat,
   createRevealOrder,
   getOwner,
-  runWithOwner
+  runWithOwner,
+  verdict
 } from "@solidjs/signals";
 import { createErrorBoundary, createLoadingBoundary, sharedConfig } from "./hydration.js";
 import type { Accessor, RevealOrder } from "@solidjs/signals";
@@ -33,10 +34,11 @@ type ForOptions<T> = {
   name?: string;
 };
 
-const narrowedError = (name: string) =>
-  IS_DEV
+const narrowedError = (name: string): never => {
+  throw IS_DEV
     ? `Attempting to access a stale value from <${name}> that could possibly be undefined. This may occur because you are reading the accessor returned from the component at a time where it has already been unmounted. We recommend cleaning up any stale timers or async, or reading from the initial condition.`
     : `Stale read from <${name}>.`;
+};
 
 /**
  * Creates a list of elements from a list.
@@ -58,7 +60,7 @@ const narrowedError = (name: string) =>
  * </For>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/for
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/for
  */
 export function For<T extends readonly any[], U extends SolidElement>(props: {
   each: T | undefined | null | false;
@@ -121,7 +123,7 @@ export function For<T extends readonly any[], U extends SolidElement>(props: {
  * </Repeat>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/repeat
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/repeat
  */
 export function Repeat<T extends SolidElement>(props: {
   count: number;
@@ -138,7 +140,9 @@ export function Repeat<T extends SolidElement>(props: {
   if (IS_OBSERVE) options.name = "<Repeat>";
   return repeat(
     () => props.count,
-    index => (typeof props.children === "function" ? props.children(index) : props.children),
+    // Read `children` once per row: an element child is a JSX getter, so a
+    // second read would build the row's nodes (and run its refs) twice (#4296).
+    (index, c = props.children) => (typeof c === "function" ? c(index) : c),
     options
   ) as unknown as SolidElement;
 }
@@ -159,7 +163,7 @@ export function Repeat<T extends SolidElement>(props: {
  * </Show>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/show
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/show
  */
 export function Show<T>(props: {
   when: T | undefined | null | false;
@@ -215,18 +219,21 @@ export function Show<T>(props: {
             }
           : { equals: (a, b) => !a === !b, sync: true }
       );
-  // Truthiness that selected the child. The accessor runs from a binding:
-  // `untrack(condition)` there serves the committed frame (undefined on the
-  // first mount of `when={latest(x)}`, #3948), and an ownerless read serves
-  // that same frame for a value staged this flush, so a live branch looks
-  // stale and halts. The flag is the selecting read, updated when selection
-  // re-runs — not a second read, and not a `latest()` import (that pulls the
-  // lane engine into every Show bundle).
-  let shown: T | undefined | null | boolean = false;
+  // A token for the selection's latest run. An `isPending()` / `latest()`
+  // probe reads `condition()` through the verdict path, which answers with
+  // the committed value of a condition staged this flush — a branch that
+  // mounted this flush would read as stale there (#4648). Inside a verdict
+  // window (`verdict` is set) the accessor the latest run handed out
+  // (`shown === run`) skips the guard; outside one — a plain read, an async
+  // callback — every accessor keeps the tracked guard below, so one read
+  // while its branch's opening is held still throws (never hands out the
+  // committed falsy). The token is a fresh object, not `c`: an older run's
+  // closure may hold an equal `c` (`true` → `false` → `true`).
+  let shown: unknown;
   return createMemo(
     () => {
-      const c = condition();
-      shown = c;
+      const c = condition(),
+        run = (shown = {});
       if (c) {
         const child = props.children;
         const fn = typeof child === "function" && child.length > 0;
@@ -236,7 +243,13 @@ export function Show<T>(props: {
             : untrack(
                 () =>
                   (child as any)(() => {
-                    if (!shown) throw narrowedError("Show");
+                    // A tracked read, as Match's guard: the binding that reads
+                    // is a frame reader, so it sees the screen's truthiness —
+                    // held-closing branch still on screen (#4354), a
+                    // `latest()`-selected first mount (#3948) — while a read
+                    // after unmount sees the committed falsy and throws.
+                    // `untrack(condition)` serves neither.
+                    (verdict && shown === run) || condition() || narrowedError("Show");
                     return conditionValue();
                   }),
                 IS_DEV && "<Show>"
@@ -268,7 +281,7 @@ type EvalConditions = readonly [number, unknown, Accessor<unknown>, AnyMatchProp
  * </Switch>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/switch-and-match
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/switch-and-match
  */
 export function Switch(props: { fallback?: SolidElement; children: SolidElement }): SolidElement {
   const chs = children(() => props.children);
@@ -314,9 +327,12 @@ export function Switch(props: { fallback?: SolidElement; children: SolidElement 
     },
     IS_OBSERVE ? { name: "conditions", sync: true } : { sync: true }
   );
+  // The selection's latest run, as Show's token (#4648), honoured only
+  // inside a verdict window: `sel` is a fresh tuple on every run.
+  let shown: unknown;
   return createMemo(
     () => {
-      const sel = switchFunc()();
+      const sel = (shown = switchFunc()());
       if (!sel) return props.fallback;
       const [index, value, conditionValue, mp] = sel;
       const child = mp.children;
@@ -327,7 +343,9 @@ export function Switch(props: { fallback?: SolidElement; children: SolidElement 
           : untrack(
               () =>
                 (child as any)(() => {
-                  if (untrack(switchFunc)()?.[0] !== index) throw narrowedError("Match");
+                  (verdict && shown === sel) ||
+                    untrack(switchFunc)()?.[0] === index ||
+                    narrowedError("Match");
                   return conditionValue();
                 }),
               IS_DEV && "<Match>"
@@ -379,7 +397,7 @@ export type AnyMatchProps<T> =
  * </Switch>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/switch-and-match
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/switch-and-match
  */
 export function Match<T>(props: {
   when: T | undefined | null | false;
@@ -419,7 +437,7 @@ export function Match<T>(props: AnyMatchProps<T>) {
  * </Errored>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/error-boundary
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/errored
  */
 export function Errored(props: {
   fallback: SolidElement | ((err: ErrorAccessor, reset: () => void) => SolidElement);
@@ -507,7 +525,7 @@ export function Errored(props: {
  * </Loading>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/suspense
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/loading
  */
 export function Loading(props: {
   fallback?: SolidElement;
@@ -566,7 +584,7 @@ export type RevealProps = {
  * </Reveal>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/reveal
+ * @description https://v2.solidjs.com/reference/solid-js/components-jsx/reveal
  */
 export function Reveal(props: RevealProps): SolidElement {
   return createRevealOrder(() => props.children, {

@@ -33,6 +33,23 @@ function Profile() {
 
 This pushes “loading state” to UI structure (boundaries) instead of leaking into every type.
 
+**Setting before the first value.** A writable async source (function-form `createSignal`/`createStore`, `createProjection`, the optimistic variants) can be written before its first answer lands. Absolute writes apply as usual. A function-form setter runs immediately against the raw base: `prev` is `undefined` for a signal or optimistic computed, and the draft is the seed (or `{}` for a seedless store). This holds for 2.x; the updater is not deferred until a value exists, because that would add a check and a queue to every setter call. The base itself is never readable (reads throw until something is written or lands). When the first answer lands, a return-form derive replaces the write; a derive that mutates its draft keeps it. If an updater can run in this window, guard it (`set(prev => (prev ?? 0) + 1)`).
+
+**Cleanup timing and cancellation.** Solid drops a superseded run's result on its own; stopping the work itself is up to the run. Two rules decide when:
+
+- **A flight stops when it's superseded.** An iterable the compute returns is closed (`return()`) as soon as the run re-runs, since nothing can show what it yields any more. An iterable you `for await` over inside an async compute is yours, and the language can't interrupt a generator paused on an `await`, so wrap it in `from()` to get the same prompt close.
+- **A frame's `onCleanup` runs when something replaces it on screen.** A run that never committed is cleaned up when it's superseded, so `onCleanup(() => ac.abort())` registered before the first `await` aborts an unfinished request promptly. The run on screen stays fully live until its replacement lands (a value or an error): its children keep reacting and its subscriptions and timers keep running, because it's still what the user sees.
+
+```js
+const results = createMemo(async () => {
+  const ac = new AbortController();
+  onCleanup(() => ac.abort()); // before the first await
+  return (await fetch(`/search?q=${query()}`, { signal: ac.signal })).json();
+});
+```
+
+Because the visible frame lives until its replacement lands, don't wait on its cleanup from inside the transition that replaces it: an action racing a promise that a memo's `onCleanup` resolves, or a new run awaiting a lock the old run releases in `onCleanup`, waits forever. Signal from the input instead (compare against the changed value, or hand the lock over when the new run acquires it). To stop work when an input changes, tie it to that input in a child computation (or a `from()` that re-runs with it), not to the outer frame.
+
 ### `Loading` is the UI boundary
 
 `Loading` shows fallback while the subtree needs unresolved async values.
@@ -93,7 +110,7 @@ on={latest(id)}: [A] → [A + spinner]  →  [B + spinner]  →  [B + comments]
 
 That is a capability, not a recommendation. The `[A + spinner]` frame is B's loading state inside A's page, for a change nothing else on the page reflects yet; reach for it only when that is what you mean.
 
-Because only the notification matters, the value returned by `on` is never compared: `on={() => { id(); return 1; }}` notifies whenever `id` changes, and an expression that reads nothing reactive never does. Optimistic writes to a dependency notify like any other write. A zero-argument function is a tracked accessor, not a callback.
+Because only the notification matters, the value of `on` is never compared: `on={(id(), 1)}` notifies whenever `id` changes even though its value is always `1`, and an expression that reads nothing reactive never does. Optimistic writes to a dependency notify like any other write. `on` takes a value, not a function: the compiler already wraps the expression so its reads are tracked, so `on={() => id()}` hands the boundary a function that nothing calls — it reads nothing and never notifies. Write the reads directly: `on={id()}`.
 
 ### `isPending(fn)` (in-flight change queries)
 
@@ -203,12 +220,7 @@ Because async lives in ordinary computations, SSR/hydration policy is a per-prim
 const user = createMemo(() => fetchUser(id()));
 
 // Server serializes the first tick; the client continues the stream from it.
-const price = createMemo(
-  async function* () {
-    for await (const tick of priceTicks(symbol())) yield tick;
-  },
-  { ssrSource: "hybrid" }
-);
+const price = createMemo(() => priceTicks(symbol()), { ssrSource: "hybrid" });
 
 // Never serialized; computed fresh once hydration completes. The declared
 // commit #0 (null) is what renders until then.
@@ -256,6 +268,8 @@ const user = createMemo(() => {
 });
 // `Promise.resolve(value)` inside the compute is the fake too, and never settles either.
 ```
+
+A cached dynamic `import()` hangs the same way ([#4332](https://github.com/solidjs/solid/issues/4332)). In a Vite build every `import()` goes through `__vitePreload`, which starts from `Promise.resolve()` read off the global at call time, so the module promise stored in a de-duplication map during the tracking run is the fake. The memo itself hydrates from the server's value, so the page looks right; the next caller that hits the map (a later mount, a navigation) waits forever and no request for the chunk is made. Use `lazy()` for components (it already refuses to cache a load made during a trace), and keep a module cache out of hydrated computes or apply the rule below.
 
 The rule for a cache seeded from hydration data: while `isHydrating()` (`solid-js`) is true, treat the seeded value as fresh, and do not populate the cache by running the fetcher. To wrap a hydrated value in a real promise, capture the constructor at module load. The fakes only replace the global inside the window.
 
@@ -343,7 +357,17 @@ navigate(`/todos/${todos.at(-1).id}`);
 
 The promise is safe to ignore — fire-and-forget `refresh()` is unchanged, and a failed refetch never surfaces an unhandled rejection from an ignored promise. The semantics are quiescence, not flight identity: if a second refresh (or any invalidation) supersedes this one mid-flight, the promise waits for — and delivers — whatever finally lands. A failed re-ask rejects with the error. Awaiting does not change the quiet-re-ask contract: `isPending` still stays `false` for a bare refresh.
 
-Refresh granularity is the granularity of the _derive function_: refreshing a nested store node re-asks the whole family projection (there is no per-path refetch to re-run), though the promise still resolves with the node you passed. Inside actions, `yield refresh(x)` is the mutate-then-refetch sequencing primitive — see RFC 06.
+Refresh granularity is the granularity of the _derive function_: there is no per-path refetch to re-run, so refresh a derived store by passing its root (`refresh(todos)`, not `refresh(todos.items[0])`) — that re-asks the whole projection, and reads through any nested node after the `await` are fresh. Inside actions, `yield refresh(x)` is the mutate-then-refetch sequencing primitive — see RFC 06.
+
+Inside an action, call `refresh(x)` from the generator. It doesn't need a `yield` unless the action needs the fresh value. Don't call it after an `await`, including inside an async helper the action yields: that code runs outside the action's transaction, like any write there. Awaiting it there also hangs. The waiter waits for the action's commit, and the commit waits for the helper. So it works until `x` happens to re-run during the action, and then it hangs:
+
+```js
+const like = action(function* () {
+  setLikes(likes() + 1);
+  yield saveLike(); // async helper: no refresh() inside it
+  refresh(post); // in the generator; `yield refresh(post)` only to wait for the fresh value
+});
+```
 
 #### `resource.mutate` → `createOptimisticStore` / `action`
 

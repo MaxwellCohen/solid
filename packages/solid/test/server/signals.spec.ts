@@ -4,6 +4,7 @@ import {
   createRoot,
   createSignal,
   createMemo,
+  createDeferred,
   createEffect,
   createRenderEffect,
   createTrackedEffect,
@@ -172,6 +173,12 @@ describe("Server createMemo", () => {
 });
 
 // === createEffect ===
+describe("Server createDeferred", () => {
+  test("is createMemo: the server always waits (D-40)", () => {
+    expect(createDeferred).toBe(createMemo);
+  });
+});
+
 describe("Server createEffect", () => {
   test("runs compute but not effectFn on the server", () => {
     const compute = vi.fn(() => 1);
@@ -614,6 +621,22 @@ describe("Server context", () => {
       { id: "test-throw" }
     );
   });
+
+  test("an explicit undefined default is no default; the dev message says so (#4181)", () => {
+    createRoot(
+      () => {
+        const Opt = createContext<string | undefined>(undefined, { name: "Opt" });
+        expect(() => useContext(Opt)).toThrow(
+          /^Context "Opt" has no provider above this read, and `createContext\(undefined\)` does not give it a default/
+        );
+        const Todos = createContext<number>();
+        expect(() => useContext(Todos)).toThrow(
+          /^Context has no provider above this read and no default value\./
+        );
+      },
+      { id: "test-undefined-default" }
+    );
+  });
 });
 
 // === Owner / ID tree ===
@@ -656,6 +679,33 @@ describe("Server owner tree", () => {
     );
     dispose();
     expect(order).toEqual(["C", "B", "A"]);
+  });
+
+  test("a throwing cleanup does not stop the walk; the first error is rethrown after (#4193)", () => {
+    const order: string[] = [];
+    let dispose!: () => void;
+    let child!: Owner;
+    createRoot(
+      d => {
+        dispose = d;
+        onCleanup(() => order.push("A"));
+        onCleanup(() => {
+          throw new Error("owner threw");
+        });
+        createRoot(() => {
+          child = getOwner()!;
+          onCleanup(() => order.push("C"));
+          onCleanup(() => {
+            throw new Error("child threw");
+          });
+        });
+        createRoot(() => onCleanup(() => order.push("D")));
+      },
+      { id: "test" }
+    );
+    expect(dispose).toThrow("child threw");
+    expect(order).toEqual(["D", "C", "A"]);
+    expect(isDisposed(child)).toBe(true);
   });
 
   test("a cleanup that disposes its own root during a rerun reset runs once (#3601)", () => {

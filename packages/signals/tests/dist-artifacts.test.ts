@@ -232,6 +232,70 @@ describe("@solidjs/signals cleanup order per tier", () => {
   }
 });
 
+describe("@solidjs/signals context read with no owner per tier", () => {
+  // Dev and observe `createComponent` (solid-js) run every component in a
+  // root, so a component created with no owner (module-scope JSX, a timer,
+  // after an `await`) reads its context default there. Prod `createComponent`
+  // adds no root, so prod `getContext` reads a missing owner as an empty
+  // root: the default, else `ContextNotFoundError` — what dev gives that
+  // component. A bare read with no owner and no component stays a
+  // `NoOwnerError` in dev, the loud tier.
+  const cores: Record<keyof typeof TIERS, () => Promise<any>> = {
+    prod: () => import("../dist/prod/index.js"),
+    observe: () => import("../dist/observe/index.js"),
+    dev: () => import("../dist/dev.js")
+  };
+  for (const tier of ["prod", "observe"] as const) {
+    test(`${tier}: a component run with no owner reads the context default`, async () => {
+      const { createContext, getContext, getOwner, untrack } = await cores[tier]();
+      const Theme = createContext("light");
+      // The prod `createComponent` shape: `untrack(() => Comp(props))`.
+      const seen = untrack(() => {
+        expect(getOwner()).toBeNull();
+        return getContext(Theme);
+      });
+      expect(seen).toBe("light");
+    });
+
+    test(`${tier}: a provided null default is returned as null`, async () => {
+      const { createContext, getContext } = await cores[tier]();
+      expect(getContext(createContext(null))).toBeNull();
+    });
+
+    test(`${tier}: with no owner and no default, the read throws ContextNotFoundError`, async () => {
+      const { createContext, getContext, ContextNotFoundError, NoOwnerError } = await cores[tier]();
+      const Missing = createContext();
+      let error: unknown;
+      try {
+        getContext(Missing);
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(ContextNotFoundError);
+      expect(error).not.toBeInstanceOf(NoOwnerError);
+    });
+  }
+
+  test("dev: a bare read with no owner throws NoOwnerError", async () => {
+    const { createContext, getContext, NoOwnerError } = await cores.dev();
+    expect(() => getContext(createContext("light"))).toThrowError(NoOwnerError);
+  });
+
+  for (const tier of Object.keys(TIERS) as (keyof typeof TIERS)[]) {
+    test(`${tier}: under an owner, a provided value wins and the default fills the gap`, async () => {
+      const { createContext, getContext, setContext, createRoot } = await cores[tier]();
+      const Theme = createContext("light");
+      const Missing = createContext();
+      createRoot(() => {
+        expect(getContext(Theme)).toBe("light");
+        setContext(Theme, "dark");
+        expect(getContext(Theme)).toBe("dark");
+        expect(() => getContext(Missing)).toThrow();
+      });
+    });
+  }
+});
+
 describe("@solidjs/signals bundled under `sideEffects: false`", () => {
   // #3891: the store half of `affects()` was installed by a bare
   // `import "./affects.js"`, which a bundler honouring `sideEffects: false`
@@ -374,15 +438,15 @@ describe("@solidjs/signals awaited refresh per tier", () => {
 
 describe("@solidjs/signals node literals per tier", () => {
   // Each node factory has two object literals — prod, and observe = prod plus
-  // its diagnostic slots (`_name`; `_owner` on signals) — selected at build
+  // its diagnostic slots (`_name`, `_loc`; `_owner` on signals) — selected at build
   // time. The slots MUST be in the literal: written after construction they
   // force a hidden-class transition and an out-of-object property on every
   // node, which was the whole of the observe tier's measured creation
   // overhead. Two hand-kept literals can drift, so this pins the invariant
   // from the built trees: the observe literal's keys are exactly the prod
   // literal's keys plus the slots, and the prod literal has no slot at all.
-  // Field names are mangled per tree (`_name` is reserved), so the
-  // comparison is by count and by the reserved name.
+  // Field names are mangled per tree (`_name` and `_loc` are reserved), so
+  // the comparison is by count and by the reserved names.
   async function literalKeys(tier: "prod" | "observe") {
     const core = (await import(`../dist/${tier}/core/core.js`)) as any;
     const owner = (await import(`../dist/${tier}/core/owner.js`)) as any;
@@ -411,17 +475,19 @@ describe("@solidjs/signals node literals per tier", () => {
     const prod = await literalKeys("prod");
     const observe = await literalKeys("observe");
     const slots: Record<string, string[]> = {
-      owner: ["_name"],
-      signal: ["_name", "_owner"],
+      owner: ["_name", "_loc"],
+      signal: ["_name", "_loc", "_owner"],
       // L2 (§31 S1): the slot literal carries `_owner` like `signal` — the
       // attribution stamp fills a slot instead of adding a field after.
-      slotSignal: ["_name", "_owner"],
-      computed: ["_name", "_devWindows"],
-      effect: ["_name", "_devWindows"]
+      slotSignal: ["_name", "_loc", "_owner"],
+      computed: ["_name", "_loc", "_devWindows"],
+      effect: ["_name", "_loc", "_devWindows"]
     };
     for (const kind of Object.keys(slots)) {
       expect(prod[kind], `${kind} prod literal carries a slot`).not.toContain("_name");
+      expect(prod[kind], `${kind} prod literal carries a slot`).not.toContain("_loc");
       expect(observe[kind], `${kind} observe literal lacks its slot`).toContain("_name");
+      expect(observe[kind], `${kind} observe literal lacks its slot`).toContain("_loc");
       expect(observe[kind].length, `${kind} literals drifted`).toBe(
         prod[kind].length + slots[kind].length
       );
@@ -438,10 +504,12 @@ describe("@solidjs/signals node literals per tier", () => {
     // Default labels and a supplied name both come out of the same literal:
     // the key set is identical either way.
     const plain = core.computed(() => 0);
-    const named = core.computed(() => 0, { name: "n" });
+    const named = core.computed(() => 0, { name: "n", loc: "src/a.ts:1:1" });
     expect(Object.keys(named)).toEqual(Object.keys(plain));
     expect(plain._name).toBe("computed");
     expect(named._name).toBe("n");
+    expect(plain._loc).toBeUndefined();
+    expect(named._loc).toBe("src/a.ts:1:1");
     // The default effect label comes from the node kind, not from an options
     // spread in the wrapper (which allocated per effect in observe).
     let effectName: string | undefined;

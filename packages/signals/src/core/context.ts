@@ -18,6 +18,10 @@ export type ContextRecord = Record<string | symbol, unknown>;
  * via a `setContext` call.
  */
 export function createContext<T>(defaultValue?: T, description?: string): Context<T> {
+  // Dev: an explicit `undefined` default is still no default (`undefined`
+  // means "not provided"); remembered so a failed read can say so (#4181).
+  if (__DEV__ && arguments.length && defaultValue === undefined)
+    return { id: Symbol(description), defaultValue, _undefinedDefault: true } as Context<T>;
   return { id: Symbol(description), defaultValue };
 }
 
@@ -26,22 +30,29 @@ export function createContext<T>(defaultValue?: T, description?: string): Contex
  * `useContext` (in `solid-js`), which wraps this primitive. Exposed here for
  * cross-package wiring (e.g. hydration-aware context plumbing).
  *
- * @throws `NoOwnerError` if there's no owner at the time of call.
+ * @throws `NoOwnerError` in dev if there's no owner at the time of call; production
+ *   reads the default instead (see below).
  * @throws `ContextNotFoundError` if a context value has not been set yet.
  *
  * @internal
  */
 export function getContext<T>(context: Context<T>, owner: Owner | null = getOwner()): T {
-  if (!owner) {
-    throw new NoOwnerError();
-  }
-
   // `undefined` alone means unset — a provided `null` is a value (no `??`).
-  let value = owner._context[context.id] as T | undefined;
+  let value: T | undefined;
+  if (owner) value = owner._context[context.id] as T | undefined;
+  // Dev keeps the loud error. Production reads with no owner as if under an
+  // empty root: the default, else `ContextNotFoundError`. That is what dev
+  // gives a component created outside any owner, since dev `createComponent`
+  // wraps every component in a root; prod `createComponent` does not.
+  else if (__DEV__) throw new NoOwnerError();
   if (value === undefined) value = context.defaultValue;
 
   if (value === undefined) {
-    throw new ContextNotFoundError();
+    // Dev names the context and why it has no value: no provider, or a
+    // provider that passed `undefined` (the key is set, to `undefined`).
+    throw __DEV__
+      ? new ContextNotFoundError(context, context.id in owner!._context)
+      : new ContextNotFoundError();
   }
 
   return value;

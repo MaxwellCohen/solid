@@ -21,13 +21,23 @@ import {
 } from "../../src/response.js";
 import { COMPOSED_BODY_FRAMING, isHttpNavigationTarget } from "../../src/constants.js";
 import { RequestContext, commitEventResponse, getRequestEvent } from "../../src/server.js";
+import { traceForEvent } from "../../src/trace.js";
 import { reportServerError } from "solid-js/internal";
 import { requestErrorHook } from "../../src/request-error-hook.js";
 import { observeInvocation } from "../../src/server-observe.js";
 import { emitFinding, errorText } from "../../src/diagnostics.js";
 import { encodeFlashCookie, setFlashSecret } from "./flash.js";
 import {
+  argumentDecodeCodec,
+  namesRefusedType,
+  refusedArgument,
+  refusedArgumentError,
+  withArgumentPlugins
+} from "./argument-codec.js";
+import { UPLOAD_ARGS_PART, createUploadDeserializer } from "./uploads.js";
+import {
   BODY_FORMAT_HEADER,
+  BUILD_HEADER,
   BodyFormat,
   ERROR_HEADER,
   LIVE_SOURCE,
@@ -39,7 +49,7 @@ import {
   assertFlightSource,
   configureServerFunctionsCodec,
   decodeResponse,
-  deserializeString,
+  deserializeStream,
   encodeErrorHeaderValue,
   extractBody,
   getHeadersAndBody,
@@ -415,7 +425,11 @@ export interface ServerFunctionsServerConfig {
   /**
    * Codec options (extra plugins etc.) for decoding arguments and encoding
    * results — must match the client's. Stored in the shared layer, so
-   * `decodeResponse` sees them too. When `serializeErrorStacks` is omitted,
+   * `decodeResponse` sees them too. One asymmetry is fixed: arguments are
+   * client input and never decode `Response` or `Request` values, whatever
+   * plugins are configured — a call carrying one is refused with `400`.
+   * Results keep the full set. Every plugin added here is a type a client
+   * can make the server construct. When `serializeErrorStacks` is omitted,
    * the server-function boundary defaults it from this module's compiled
    * development variant.
    */
@@ -482,6 +496,18 @@ export interface ServerFunctionsServerConfig {
    * outside the dev build; `0`/`undefined` is off.
    */
   chaosReconnectEvery?: number;
+  /**
+   * Id of the build this server was bundled with. A call whose
+   * `X-Server-Function-Build` header names another build is answered `409`
+   * and the function does not run: the page was loaded from a build whose
+   * functions may take other arguments or return another shape. The answer
+   * carries the unknown-function label, so the client rejects with
+   * `unknownFunction: true`, the same as for an id this build does not
+   * have. The client runtime does not send the header itself: the build
+   * integration adds it through `prepareRequest`. Calls without the header
+   * are not checked. Leave unset to check nothing.
+   */
+  buildId?: string;
 }
 
 /**
@@ -529,6 +555,14 @@ export interface ServerFunctionInvocation {
    * `false` for the data and bare addresses, and for in-process calls.
    */
   live: boolean;
+  /** A live call to a `broadcast` declaration: its answer is shared. */
+  broadcast?: boolean;
+  /**
+   * For a broadcast call, the arguments as they arrived on the wire: callers
+   * whose encodings are equal share one render. Absent when the encoding
+   * wasn't kept (an unbuffered body), and then the call is not shared.
+   */
+  shareKey?: string;
 }
 
 /**
@@ -573,7 +607,7 @@ export interface HandleServerFunctionOptions {
    * This request's server error hook, ahead of `configureServerErrors`' (see
    * `ServerErrorHook` in `@solidjs/web`): the function's throw
    * (`handling: "thrown"`) and a failure escaping through its result graph
-   * (`"channel"`), once per error, before the wire policy applies. Entry-only
+   * (`"channel"`), once per error per request, before the wire policy applies. Entry-only
    * like `wrapInvocation`: a direct call the body makes during a render
    * reports through the ambient hook.
    */
@@ -666,7 +700,8 @@ const config = {
   csrf: true,
   bodySizeLimit: 1_048_576,
   maxArguments: 1000,
-  chaosReconnectEvery: 0
+  chaosReconnectEvery: 0,
+  buildId: undefined
 }; /**
  * Configures the server runtime. Call once at server startup, before
  * handling requests. Only needed when deviating from the defaults (custom
@@ -707,7 +742,8 @@ export function configureServerFunctionsServer({
   bodySizeLimit,
   maxArguments,
   secret,
-  chaosReconnectEvery
+  chaosReconnectEvery,
+  buildId
 } = {}) {
   if (provideEvent !== undefined) config.provideEvent = provideEvent;
   if (wrapInvocation !== undefined) config.wrapInvocation = wrapInvocation;
@@ -724,6 +760,7 @@ export function configureServerFunctionsServer({
   // the flash codec owns the key (flash.js) — the option just names it
   if (secret !== undefined) setFlashSecret(secret);
   if (chaosReconnectEvery !== undefined) config.chaosReconnectEvery = chaosReconnectEvery;
+  if (buildId !== undefined) config.buildId = buildId;
 }
 
 // Named flight-data collectors, keyed by source id. The unnamed
@@ -882,66 +919,173 @@ function scopeDeferredResult(value, scope) {
 /** One carrier mid-walk on the direct road's descent. Module-private, so a
  * user value can never satisfy the driver's `instanceof` dispatch. */
 class ScopeFrame {
-  constructor(value, next, keys, descriptors) {
+  constructor(value, prototype, keys, i, first) {
     this.value = value;
-    this.next = next;
+    this.prototype = prototype;
+    this.next = null;
     this.keys = keys;
-    this.descriptors = descriptors;
-    this.i = 0;
+    this.i = i;
+    this.first = first;
+    this.descriptors = null;
+    this.snapshotted = false;
     this.changed = false;
   }
 }
 
+/** The frame's shallow-rebuilt shell, built on first need: most carriers
+ * hold nothing to bind and hand the author's container back unbuilt. */
+function frameShell(frame) {
+  return (frame.next ??= frame.keys
+    ? Object.create(
+        frame.prototype,
+        frame.descriptors ?? Object.getOwnPropertyDescriptors(frame.value)
+      )
+    : frame.value.slice());
+}
+
+// writable data only: accessors are not invoked, non-writable slots stay as authored
+function writableValue(descriptor) {
+  return descriptor !== undefined && "value" in descriptor && descriptor.writable === true
+    ? descriptor.value
+    : undefined;
+}
+
+function carrierSlot(frame, key) {
+  return writableValue(
+    frame.descriptors ? frame.descriptors[key] : Object.getOwnPropertyDescriptor(frame.value, key)
+  );
+}
+
+// Authored code may run from here on, so the object frames on the stack take the
+// entry-time descriptor snapshot their slots and shells read. Frames below a
+// snapshotted one were already on the stack when it was taken.
+function snapshotFrames(stack) {
+  for (let k = stack.length - 1; k >= 0 && !stack[k].snapshotted; k--) {
+    const frame = stack[k];
+    frame.snapshotted = true;
+    if (frame.keys) frame.descriptors = Object.getOwnPropertyDescriptors(frame.value);
+  }
+}
+
+function isLeaf(value) {
+  return value === null || (typeof value !== "object" && typeof value !== "function");
+}
+
+// without these overrides, bindDeferredBody's probes cannot run authored code on a plain carrier
+function sharedPrototypesInert() {
+  const { toStringTag, asyncIterator, iterator, hasInstance } = Symbol;
+  return !(
+    Object.hasOwn(Promise, hasInstance) ||
+    (typeof ReadableStream !== "undefined" && Object.hasOwn(ReadableStream, hasInstance)) ||
+    Object.hasOwn(Object.prototype, toStringTag) ||
+    Object.hasOwn(Object.prototype, asyncIterator) ||
+    Object.hasOwn(Object.prototype, iterator) ||
+    Object.hasOwn(Array.prototype, toStringTag) ||
+    Object.hasOwn(Array.prototype, asyncIterator)
+  );
+}
+
+// own hooks are tested without reading them; the reads then only reach a proxy's get trap
+function isInertCarrier(value, prototype, isArray) {
+  const { toStringTag, asyncIterator, iterator } = Symbol;
+  return (
+    (isArray
+      ? prototype === Array.prototype
+      : prototype === Object.prototype || prototype === null) &&
+    !Object.hasOwn(value, toStringTag) &&
+    !Object.hasOwn(value, asyncIterator) &&
+    (isArray || !Object.hasOwn(value, iterator)) &&
+    typeof value[asyncIterator] !== "function" &&
+    (isArray || typeof value[iterator] !== "function")
+  );
+}
+
 /** Resolve one nested value for the direct road's carrier descent: leaves,
  * already-walked entries and deferred bodies answer immediately; a plain
- * object or array answers a frame for the driver, its shallow-rebuilt shell
- * pre-registered so cycles resolve to the shell being built. */
+ * object or array answers a frame for the driver, pre-registered so a cycle
+ * builds and resolves to its shell; an all-leaf carrier gets no frame. */
 function enterScopeCarrier(value, state) {
-  if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
-  if (state.seen.has(value)) {
+  if (isLeaf(value)) return value;
+  // entries are never undefined, so one lookup answers both questions
+  const seen = state.seen.get(value);
+  if (seen !== undefined) {
     state.cyclic.add(value);
-    return state.seen.get(value);
+    return seen instanceof ScopeFrame ? frameShell(seen) : seen;
   }
-  const bound = bindDeferredBody(value, state.scope);
-  if (bound !== value) {
-    state.seen.set(value, bound);
-    return bound;
+  let isArray = false;
+  let prototype;
+  if (typeof value === "object") {
+    isArray = Array.isArray(value);
+    prototype = Object.getPrototypeOf(value);
   }
-  if (typeof value !== "object") return value;
+  if (!state.inert || prototype === undefined || !isInertCarrier(value, prototype, isArray)) {
+    snapshotFrames(state.stack);
+    const bound = bindDeferredBody(value, state.scope);
+    if (bound !== value) {
+      state.seen.set(value, bound);
+      return bound;
+    }
+    if (typeof value !== "object") return value;
+  }
   // Frozen carriers (and every slot of one) are out of the carrier set:
   // rebuilding around them would hand the caller a shape the author sealed.
-  if (Array.isArray(value)) {
+  if (isArray) {
     if (Object.isFrozen(value)) {
       state.seen.set(value, value);
       return value;
     }
-    const next = value.slice();
-    state.seen.set(value, next);
-    return new ScopeFrame(value, next, null, null);
+    let i = 0;
+    let first;
+    while (i < value.length && isLeaf((first = value[i]))) i++;
+    if (i === value.length) {
+      state.seen.set(value, value);
+      return value;
+    }
+    const frame = new ScopeFrame(value, null, null, i, first);
+    state.seen.set(value, frame);
+    return frame;
   }
-  const prototype = Object.getPrototypeOf(value);
-  if ((prototype !== Object.prototype && prototype !== null) || Object.isFrozen(value)) {
+  if (prototype !== Object.prototype && prototype !== null) {
     state.seen.set(value, value);
     return value;
   }
-  // The shell carries the original descriptors whole — hidden slots,
-  // accessors and non-writable data stay exactly as authored (accessors are
-  // the caller's to invoke, non-writable slots are out of the carrier set);
-  // only writable enumerable data slots are candidates for binding.
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const next = Object.create(prototype, descriptors);
-  state.seen.set(value, next);
-  return new ScopeFrame(value, next, Object.keys(value), descriptors);
+  // only enumerable slots are candidates; the shell copies every descriptor
+  const keys = Object.keys(value);
+  let i = 0;
+  let first;
+  while (
+    i < keys.length &&
+    isLeaf((first = writableValue(Object.getOwnPropertyDescriptor(value, keys[i]))))
+  )
+    i++;
+  if (i === keys.length) {
+    state.seen.set(value, value);
+    return value;
+  }
+  if (Object.isFrozen(value)) {
+    state.seen.set(value, value);
+    return value;
+  }
+  const frame = new ScopeFrame(value, prototype, keys, i, first);
+  state.seen.set(value, frame);
+  return frame;
 }
 
 // The descent is ITERATIVE for the same reason the codec road's walk is
 // (#3160): a deep-but-legal result must not overflow the stack and surface
 // as a phantom error. The driver mirrors guardFailures' frame loop.
 function scopeDeferredContents(root, scope) {
-  const state = { seen: new Map(), cyclic: new Set(), scope };
+  const stack = [];
+  const state = {
+    seen: new Map(),
+    cyclic: new Set(),
+    scope,
+    inert: sharedPrototypesInert(),
+    stack
+  };
   const entered = enterScopeCarrier(root, state);
   if (!(entered instanceof ScopeFrame)) return entered;
-  const stack = [entered];
+  stack.push(entered);
   let delivered = NOTHING;
   for (;;) {
     const top = stack[stack.length - 1];
@@ -950,20 +1094,11 @@ function scopeDeferredContents(root, scope) {
     while (top.i < length) {
       const i = top.i;
       let original;
-      let writable = true;
-      if (top.keys) {
-        const descriptor = top.descriptors[top.keys[i]];
-        // accessors are not invoked, and non-writable slots keep their
-        // authored value (out of the carrier set) — both already ride the
-        // shell's copied descriptors
-        writable = "value" in descriptor && descriptor.writable === true;
-        original = writable ? descriptor.value : undefined;
+      if (top.first !== NOTHING) {
+        original = top.first;
+        top.first = NOTHING;
       } else {
-        original = top.value[i];
-      }
-      if (!writable) {
-        top.i++;
-        continue;
+        original = top.keys ? carrierSlot(top, top.keys[i]) : top.value[i];
       }
       let bound;
       if (delivered !== NOTHING) {
@@ -977,8 +1112,8 @@ function scopeDeferredContents(root, scope) {
         }
       }
       if (bound !== original) {
-        if (top.keys) top.next[top.keys[i]] = bound;
-        else top.next[i] = bound;
+        if (top.keys) frameShell(top)[top.keys[i]] = bound;
+        else frameShell(top)[i] = bound;
         top.changed = true;
       }
       top.i++;
@@ -992,7 +1127,8 @@ function scopeDeferredContents(root, scope) {
     // took the shell; otherwise the caller keeps the author's container
     let out;
     if (top.changed || state.cyclic.has(top.value)) {
-      out = top.next;
+      out = frameShell(top);
+      state.seen.set(top.value, out);
     } else {
       state.seen.set(top.value, top.value);
       out = top.value;
@@ -1003,7 +1139,7 @@ function scopeDeferredContents(root, scope) {
 }
 
 function bindDeferredBody(value, scope) {
-  if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
+  if (isLeaf(value)) return value;
 
   const promised = scope(() => nativePromise(value));
   if (promised) {
@@ -1582,8 +1718,8 @@ function guardDeclaredMethod(metadata, id) {
  * iterable (registered symbol `solid.LiveSource`) so SSR faces meeting the
  * value in-process can apply live policy (document face: first value, then
  * client takeover). Dispatch is untouched — over-the-wire calls stream the
- * raw registered function's result. Declare live outermost:
- * `live(GET(fn))`.
+ * raw registered function's result. Implies `GET` (a live source is a
+ * read), so the same safe-read rules apply.
  */
 export function live<A extends readonly any[], R>(
   fn: (...args: A) => R
@@ -1606,9 +1742,10 @@ export function live<A extends readonly any[], R>(
  * behavior is the value brand: in-process calls (SSR) meet the result
  * after it has left the reference's hands, so the brand must travel on the
  * value. Dispatch is untouched — over-the-wire calls stream the raw
- * registered function's result exactly as before. Composes with `GET` but
- * does not imply it; declare live outermost (`live(GET(fn))`), matching
- * the client half where live's behavior wraps the call.
+ * registered function's result exactly as before. Implies `GET`: a live
+ * source is a read by contract, so the declaration grants GET dispatch
+ * (and its safe-read obligations, see `GET`) unless the reference already
+ * declared it — `live(GET(fn))` stays valid and is equivalent.
  *
  * ```ts
  * export const stockPrice = live(async function* (symbol: string) {
@@ -1621,6 +1758,9 @@ export function live(fn) {
   if (!isServerFunction(fn) || typeof fn.id !== "string") {
     throw new Error("live expects a server function reference");
   }
+  // live implies GET: a live source is a read by contract. An explicit
+  // GET(fn) inside passes through untouched.
+  if (getServerFunctionMetadata(fn)?.method !== "GET") fn = GET(fn);
   const metadata = { ...getServerFunctionMetadata(fn), live: true };
   const wrapped = async (...args) => brandLive(await fn(...args));
   wrapped[SERVER_FUNCTION_METADATA] = metadata;
@@ -1632,6 +1772,47 @@ export function live(fn) {
   });
   return wrapped;
 }
+
+/**
+ * Declares a live server function whose answer is the same for every
+ * viewer: implies `live` and `GET`, and at the live address every caller
+ * with the same arguments shares ONE render (frames server half) or ONE
+ * data source (see sharedSourceResponse). The outer body still runs per
+ * call — a gate (auth, redirects) — but what it returns is the shared
+ * answer's to render.
+ */
+export function broadcast<A extends readonly any[], R>(
+  fn: (...args: A) => R
+): ServerFunction<A, LiveSource<Awaited<R>>>;
+
+export function broadcast(fn) {
+  const ref = live(fn);
+  ref[SERVER_FUNCTION_METADATA].broadcast = true;
+  BROADCASTS.add(fn.id);
+  return ref;
+}
+
+// A broadcast's share key: the arguments as encoded, never as decoded. A
+// decoded value's JSON loses what the codec kept (every Set and Map is `{}`,
+// a BigInt throws), so two callers with different arguments would share one
+// render. Encodings that differ for equal values only cost sharing. A POST
+// body is keyed with its content type; one this dispatch didn't buffer has no
+// key, and the call is served per connection. A read without args is keyed by its form query.
+function encodedArguments(request, url, argsEncoding, argumentBytes) {
+  if (request.method !== "POST") return argsEncoding || url.search;
+  if (!argumentBytes) return undefined;
+  return (
+    (request.headers.get("content-type") || "") +
+    "\0" +
+    (argsEncoding || "") +
+    "\0" +
+    new TextDecoder("latin1").decode(argumentBytes)
+  );
+}
+
+// Ids declared `broadcast` — read by dispatch onto the invocation, since
+// the wire never sees a reference's metadata.
+const BROADCASTS = new Set();
 
 /**
  * Brands a live declaration's answer, in process: the async iterable it IS
@@ -1864,7 +2045,60 @@ function unknownFormatError(tag) {
   return error;
 }
 
-async function parseArguments(request, url, scripted, codec) {
+// Decodes one argument payload to its value. A payload already wholly in
+// memory — the `?args=` query, a POST body the size bound buffered — is
+// decoded to its LAST frame before dispatch: a refused value inside a
+// promise or stream (see argument-codec.js) arrives in a later frame than
+// the head the call would be dispatched on, and only reading to the end
+// answers that refusal with the same 400 a top-level one gets. The wait
+// rides the decoder's connection slot (the one a live loop uses), which
+// hands the stream's end back instead of sweeping it; the sweep then runs
+// here exactly as the decoder would have run it. A refused type fails the
+// decode (see argument-codec.js); whether a failure WAS a refusal is read
+// off the payload, and only on failure — at the head, or at a later frame,
+// which is when deferreds are left open at the stream's end. Any other
+// failure keeps its existing answer: a 400 at the head, a failed promise or
+// stream past it. A body that streams in (`bodySizeLimit: Infinity`, so no
+// `payload`) cannot be waited on: there a refusal fails the promise or
+// stream that would have carried the value.
+async function decodeArguments(decode, payload) {
+  if (payload === null) return await decode(undefined);
+  const refuseNamed = () => {
+    const text = typeof payload === "string" ? payload : new TextDecoder().decode(payload);
+    if (namesRefusedType(text)) throw refusedArgumentError();
+  };
+  const connection = {};
+  let value;
+  try {
+    value = await decode({ connection });
+  } catch (error) {
+    if (connection.ended) connection.ended.then(end => end.sweep());
+    refuseNamed();
+    throw error;
+  }
+  if (connection.ended) {
+    const { open, sweep } = await connection.ended;
+    sweep();
+    if (open) refuseNamed();
+  }
+  return value;
+}
+
+// The decode module carries the default plugin set the argument list is
+// filtered from; loaded on the first codec-framed argument payload only, as
+// the decoder itself is.
+// Synchronous once loaded: the argument road already awaits enough.
+let decodeModule;
+async function loadArgumentCodec(codec) {
+  decodeModule = await import("../../serialization/src/serializer-decode.js");
+  return argumentDecodeCodec(codec, decodeModule.DEFAULT_WEB_PLUGINS);
+}
+const argumentCodecFor = codec =>
+  decodeModule
+    ? argumentDecodeCodec(codec, decodeModule.DEFAULT_WEB_PLUGINS)
+    : loadArgumentCodec(codec);
+
+async function parseArguments(request, url, scripted, codec, buffered) {
   const parsed = [];
   // Bound arguments arrive on the url for GET calls, no-JS form posts, and
   // scripted POSTs whose body is a natural HTTP encoding (FormData,
@@ -1881,7 +2115,12 @@ async function parseArguments(request, url, scripted, codec) {
     // reserves `args`, so a caller that sends it sent an encoding.
     let result;
     if (args.startsWith(";0x")) {
-      result = await deserializeString(args, codec);
+      let argumentCodec = argumentCodecFor(codec);
+      if (argumentCodec instanceof Promise) argumentCodec = await argumentCodec;
+      result = await decodeArguments(
+        wire => deserializeStream(new Response(args), argumentCodec, wire),
+        args
+      );
     } else {
       // The framed codec enforces its own depth cap; bare JSON must not be
       // the uncapped alternative (#3119).
@@ -1927,7 +2166,32 @@ async function parseArguments(request, url, scripted, codec) {
     // a matched decode consumes it, and the fall-through hands it to the
     // empty-body inspection instead of minting a second clone.
     const body = request.clone();
-    const decoded = await extractBody(body, codec);
+    let decoded;
+    if (bodyFormat === BodyFormat.Serialized) {
+      let argumentCodec = argumentCodecFor(codec);
+      if (argumentCodec instanceof Promise) argumentCodec = await argumentCodec;
+      if ((request.headers.get("content-type") || "").startsWith("multipart/form-data")) {
+        // A codec argument list with its files as form parts (see uploads.js).
+        // The tag stays `Serialized` so the client runtime pays nothing for
+        // uploads; the multipart content type is what marks one. The upload
+        // plugin is made for this request only, so a file index means
+        // something here and nowhere else.
+        const form = await body.formData();
+        const encoded = form.get(UPLOAD_ARGS_PART);
+        if (typeof encoded !== "string") {
+          throw new TypeError("Malformed server function upload");
+        }
+        const uploadCodec = withArgumentPlugins(argumentCodec, [createUploadDeserializer(form)]);
+        decoded = await decodeArguments(
+          wire => deserializeStream(new Response(encoded), uploadCodec, wire),
+          encoded
+        );
+      } else {
+        decoded = await decodeArguments(wire => extractBody(body, argumentCodec, wire), buffered);
+      }
+    } else {
+      decoded = await extractBody(body, codec);
+    }
     // Both argument-array encodings: codec-framed and plain JSON. The
     // framed codec enforces its own depth cap during decode; bare JSON
     // must not be the uncapped alternative (#3119). Either way the payload
@@ -2891,6 +3155,9 @@ function keepGuarded(value, next, changed, state) {
  * encodeLiveResult): the same payloads one per event, a comment heartbeat
  * while idle, and each yield's position — parked on `live.pending` by the
  * live adapter — riding as the `id:` of the record that carries the yield.
+ * A broadcast's shared stream (`live.nodes`) is nobody's body: it carries
+ * no heartbeat or chaos (each tap arms its own), and records which node
+ * each chunk carries for the fan-out to read (see startSharedSource).
  */
 export function serializeResponseStream(value, codecOptions, signal, scope, live) {
   let closed = false;
@@ -2978,7 +3245,7 @@ export function serializeResponseStream(value, codecOptions, signal, scope, live
     // promise — reads wait for it, so the stream's contract is unchanged
     async start(controller) {
       streamController = controller;
-      if (live) stopLive = armLiveBody(controller, teardown);
+      if (live && !live.nodes) stopLive = armLiveBody(controller, teardown);
       if (signal) {
         if (signal.aborted) {
           teardown();
@@ -3012,7 +3279,10 @@ export function serializeResponseStream(value, codecOptions, signal, scope, live
       cancelSerialize = serializeJSON(value, {
         ...codecOptions,
         onParse(node) {
-          if (!closed) controller.enqueue(frame(JSON.stringify(node)));
+          if (closed) return;
+          const chunk = frame(JSON.stringify(node));
+          if (live && live.nodes) live.nodes.set(chunk, node);
+          controller.enqueue(chunk);
         },
         onDone() {
           if (closed) return;
@@ -3142,8 +3412,14 @@ export function armLiveBody(controller, teardown) {
  * A one-value answer gets the same treatment: skipped, it is an empty
  * stream — the iteration completes with nothing, exactly as it would have
  * completed after one value the client already had.
+ *
+ * `refs` (a broadcast's shared stream) is the codec's reference space,
+ * turned as each yield arrives so it never reaches past the yield before
+ * (see GenerationalRefs); each yield is queued with its position for the
+ * fan-out, which takes one per yield record it reads (a record of a value
+ * nested in an earlier yield can land between a step and its yield's).
  */
-function liveSource(value, lastEventId, position, scope) {
+function liveSource(value, lastEventId, position, scope, refs) {
   const digestOf = v => (scope ? scope(() => positionDigest(v)) : positionDigest(v));
   if (
     value === null ||
@@ -3163,7 +3439,9 @@ function liveSource(value, lastEventId, position, scope) {
       const step = () =>
         iterator.next().then(result => {
           if (result.done) return result;
+          if (refs) refs.turn();
           const digest = digestOf(result.value);
+          if (refs) position.yields.push({ value: result.value, digest });
           if (first) {
             first = false;
             if (digest !== undefined && digest === lastEventId) return step();
@@ -3193,9 +3471,18 @@ function liveSource(value, lastEventId, position, scope) {
  * (a returned Response body, a Blob) take the ordinary road — there is
  * nothing to stream and nothing to position.
  */
-function encodeLiveResult(value, headers, status, codec, request, scope) {
+function encodeLiveResult(value, headers, status, codec, request, scope, shareKey) {
   if (NULL_BODY_STATUSES.has(status) || value === undefined || getHeadersAndBody(value)) {
     return encodeResult(value, headers, status, codec, request.signal, scope);
+  }
+  if (
+    shareKey !== undefined &&
+    value !== null &&
+    typeof value === "object" &&
+    typeof value[Symbol.asyncIterator] === "function"
+  ) {
+    const shared = sharedSourceResponse(shareKey, value, headers, status, codec, request);
+    if (shared) return shared;
   }
   const position = { pending: undefined };
   const source = liveSource(value, request.headers.get(LAST_EVENT_ID_HEADER), position, scope);
@@ -3214,6 +3501,267 @@ function encodeLiveResult(value, headers, status, codec, request, scope) {
       ? new Error(`Server function result could not be encoded: ${error.message}`)
       : error;
   }
+}
+
+// ---- broadcast: one source per live address, its viewers taps on it ----
+//
+// A `broadcast` declaration promises its answer is the same for every
+// viewer, so callers with the same arguments share ONE source: the first
+// call's is started, and every call (that one included) is a tap. Each
+// codec record is framed once and written to every tap. A later caller's
+// own answer is never read: it is closed unstarted (a generator's body
+// never runs). The frames sink does the same for a server component.
+//
+// A yield still refers to the objects it shares with the yield before it
+// (an unchanged row goes as a reference, as on a per-viewer stream), but
+// never further back: the reference space keeps only what the latest yield
+// touched. So a tap that joins late is sent the stream's head and the
+// latest yield encoded on its own, with each object under the id the
+// shared stream gave it; every record after that refers only to ids it
+// holds. A reconnect is sent that yield too, even when it holds the value
+// already: the ids are what it lacks. The source ends when its last tap
+// does.
+const SHARED_SOURCES = new Map();
+
+// The codec's reference space for a shared stream (see above): ids keep
+// counting, what they point at is kept one yield (`turn`).
+class GenerationalRefs extends Map {
+  count = 0;
+  touched = new Set();
+  get size() {
+    return this.count;
+  }
+  get(key) {
+    const id = super.get(key);
+    if (id !== undefined) this.touched.add(key);
+    return id;
+  }
+  set(key, value) {
+    if (!super.has(key)) this.count++;
+    this.touched.add(key);
+    return super.set(key, value);
+  }
+  turn() {
+    for (const key of [...super.keys()]) if (!this.touched.has(key)) super.delete(key);
+    this.touched = new Set();
+  }
+  idOf(key) {
+    return super.get(key);
+  }
+  reserve() {
+    return this.count++;
+  }
+}
+
+/**
+ * Answers a broadcast call from its key's shared source, starting one when
+ * none runs. `undefined` when the call can't join the running one (its
+ * latest yield holds a value still settling, which no joiner can be given
+ * whole): the caller is then served per connection.
+ */
+function sharedSourceResponse(key, value, headers, status, codec, request) {
+  let shared = SHARED_SOURCES.get(key);
+  let snapshot;
+  if (shared && !shared.ended) {
+    snapshot = sharedSnapshot(shared);
+    if (snapshot === null) return undefined;
+    if (value !== shared.source) closeUnread(value);
+  } else shared = startSharedSource(key, value, codec);
+  return tapSharedSource(shared, request, headers, status, snapshot);
+}
+
+function closeUnread(value) {
+  try {
+    const closing =
+      typeof value.return === "function"
+        ? value.return()
+        : typeof value.cancel === "function"
+          ? value.cancel()
+          : undefined;
+    if (closing && typeof closing.then === "function") closing.then(undefined, () => {});
+  } catch {}
+}
+
+function startSharedSource(key, value, codec) {
+  const refs = new GenerationalRefs();
+  const shared = {
+    key,
+    codec,
+    refs,
+    encode: null,
+    head: null,
+    node: null,
+    value: undefined,
+    position: undefined,
+    stream: undefined,
+    // What the first caller answered: a later caller answering the same
+    // iterable (a module-scope source) is not closed out from under it.
+    source: value,
+    taps: new Set(),
+    ended: false,
+    teardown: new AbortController()
+  };
+  SHARED_SOURCES.set(key, shared);
+  // The shared source is nobody's request: its steps run under their own
+  // event, so request-scoped state starts empty and request fields read as
+  // absent.
+  const event = broadcastEvent();
+  const store = globalThis[RequestContext];
+  const scope = run => (store ? store.run(event, run) : run());
+  const live = { pending: undefined, yields: [], nodes: new WeakMap() };
+  const body = serializeResponseStream(
+    liveSource(value, undefined, live, scope, refs),
+    { ...codec, refs },
+    shared.teardown.signal,
+    scope,
+    live
+  );
+  pumpSharedSource(shared, body.getReader(), live);
+  return shared;
+}
+
+async function pumpSharedSource(shared, reader, { nodes, yields }) {
+  try {
+    shared.encode = (await import("../../serialization/src/serializer.js")).serializeJSON;
+    while (true) {
+      const { done, value: chunk } = await reader.read();
+      if (done) break;
+      const node = nodes.get(chunk);
+      if (shared.head === null) shared.head = chunk;
+      else if (node && node.t === 32 /* StreamNext */ && (shared.stream ??= node.i) === node.i) {
+        const { value, digest } = yields.shift();
+        shared.node = node;
+        shared.value = value;
+        shared.position = digest;
+      }
+      for (const tap of shared.taps) tap.write(chunk);
+    }
+  } catch {}
+  shared.ended = true;
+  if (SHARED_SOURCES.get(shared.key) === shared) SHARED_SOURCES.delete(shared.key);
+  for (const tap of [...shared.taps]) tap.end();
+}
+
+/**
+ * The latest yield, encoded whole for a joining tap under the shared
+ * stream's ids (see the notes above). `undefined` before the first yield
+ * (the head is all there is); `null` when the value can't be encoded
+ * synchronously (it holds a promise or stream still settling).
+ */
+function sharedSnapshot(shared) {
+  if (shared.node === null) return undefined;
+  const own = new Map();
+  let root;
+  let done = false;
+  const cancel = shared.encode(shared.value, {
+    ...shared.codec,
+    refs: own,
+    onParse(node) {
+      root ??= node;
+    },
+    onDone() {
+      done = true;
+    },
+    onError() {}
+  });
+  if (!done || root === undefined) {
+    cancel();
+    return null;
+  }
+  // Every object of the latest read yield is still in `shared.refs`: the
+  // demand gate lets the source step at most once past the pump, and a
+  // turn keeps what the yield before touched. `reserve` covers what the
+  // codec registers that is not the value's own (none for plain data).
+  const ids = new Map();
+  for (const [value, id] of own) ids.set(id, shared.refs.idOf(value) ?? shared.refs.reserve());
+  return createEventChunk(
+    JSON.stringify({ ...shared.node, f: renumberNode(root, ids) }),
+    shared.position
+  );
+}
+
+// A codec node with its reference ids (`i`, on every node that has one)
+// mapped through `ids`. Data never appears raw in a node — keys are
+// strings, values are nodes — so every `i` is an id.
+function renumberNode(node, ids) {
+  if (Array.isArray(node)) return node.map(item => renumberNode(item, ids));
+  if (node === null || typeof node !== "object") return node;
+  const out = {};
+  for (const key in node)
+    out[key] =
+      key === "i" && typeof node[key] === "number"
+        ? (ids.get(node[key]) ?? node[key])
+        : renumberNode(node[key], ids);
+  return out;
+}
+
+function tapSharedSource(shared, request, headers, status, snapshot) {
+  headers.set(BODY_FORMAT_HEADER, BodyFormat.Serialized);
+  headers.set("Content-Type", "text/event-stream");
+  headers.set("Cache-Control", "no-store");
+  headers.set("X-Accel-Buffering", "no");
+  const signal = request.signal;
+  let closed = false;
+  let stopLive = null;
+  let tap = null;
+  const leave = () => {
+    if (closed) return;
+    closed = true;
+    if (stopLive) stopLive();
+    if (signal) signal.removeEventListener("abort", leave);
+    shared.taps.delete(tap);
+    if (!shared.taps.size && !shared.ended) {
+      shared.ended = true;
+      if (SHARED_SOURCES.get(shared.key) === shared) SHARED_SOURCES.delete(shared.key);
+      shared.teardown.abort();
+    }
+  };
+  const body = new ReadableStream({
+    start(controller) {
+      tap = {
+        write(chunk) {
+          if (closed) return;
+          try {
+            controller.enqueue(chunk);
+          } catch {
+            leave();
+          }
+        },
+        end() {
+          leave();
+          try {
+            controller.close();
+          } catch {}
+        }
+      };
+      stopLive = armLiveBody(controller, leave);
+      if (shared.head) controller.enqueue(shared.head);
+      if (snapshot) controller.enqueue(snapshot);
+      if (shared.ended || (signal && signal.aborted)) return tap.end();
+      shared.taps.add(tap);
+      if (signal) signal.addEventListener("abort", leave);
+    },
+    cancel() {
+      leave();
+    }
+  });
+  return new Response(body, { status, headers });
+}
+
+function broadcastEvent() {
+  const event = { broadcast: true };
+  for (const name of ["request", "locals", "clientAddress", "nativeEvent"])
+    Object.defineProperty(event, name, {
+      get() {
+        if (DEV)
+          console.warn(
+            `A broadcast server function read the request (\`event.${name}\`) while producing ` +
+              "its answer, which every viewer shares; read per-viewer state before returning it."
+          );
+        return undefined;
+      }
+    });
+  return event;
 }
 
 function encodeResult(value, headers, status, codec, signal, scope) {
@@ -3404,10 +3952,11 @@ export function sanitizeServerError(value: unknown): unknown;
 // with the function named, before `sanitizeServerError` applies. The hook's
 // mapping, when it gives one, IS the wire value (intent, as a
 // `wrapInvocation` mapping is). The verdict is shared with the render side
-// through the same once-per-error cache (`reportServerError`), so a direct
-// call that throws during SSR is reported here as the function's failure
-// and the <Errored> that contains it reuses the answer without reporting
-// again. Per-request hooks ride the event (the handler's option); the
+// through the same once-per-error-per-request cache (`reportServerError`;
+// a direct call's derived event shares the request it was made under), so
+// a direct call that throws during SSR is reported here as the function's
+// failure and the <Errored> that contains it reuses the answer, heard again
+// only as the render's (`kind: "render"`: one per kind). Per-request hooks ride the event (the handler's option); the
 // channel sites read the event off the scope their operations run in. A
 // direct call reports through the hook of the render serving its request
 // (`requestErrorHook`). None is ever read off the global SSR context: that
@@ -3448,10 +3997,12 @@ function currentEvent() {
  * Reports a direct call's failure as the function's (`direct: true`) through
  * `hook` (its request's render's) and rethrows the ORIGINAL: the render that
  * made the call contains it, and the wire policy there reuses the verdict
- * decided here.
+ * decided here. Thrown Responses and envelopes bypass this report, matching
+ * HTTP dispatch.
  */
 function reportDirectFailure(run, id, hook) {
   const report = error => {
+    if (error instanceof Response || isResponseEnvelope(error)) throw error;
     reportServerError(
       error,
       { kind: "server-function", handling: "thrown", functionId: id, direct: true },
@@ -3677,9 +4228,12 @@ function withCSRFVary(response) {
 // The request headers the client transport sets on its own calls — what a
 // preflight that names none (a bare `Access-Control-Request-Method`) is
 // told it may send.
-const TRANSPORT_REQUEST_HEADERS = ["Content-Type", BODY_FORMAT_HEADER, SINGLE_FLIGHT_HEADER].join(
-  ", "
-);
+const TRANSPORT_REQUEST_HEADERS = [
+  "Content-Type",
+  BODY_FORMAT_HEADER,
+  SINGLE_FLIGHT_HEADER,
+  BUILD_HEADER
+].join(", ");
 // How long a browser may reuse a preflight answer for one address. Each
 // function has an address of its own, so this is per function, and a
 // change to the allowlist is honoured within it (browsers cap the value
@@ -4065,6 +4619,31 @@ export async function handleServerFunctionRequest(request, options = {}) {
     const response = new Response(DEV ? "Server function not found" : null, { status: 404 });
     return finish(protectsRequest ? withCSRFVary(response) : response);
   }
+  // The build-id refusal (see BUILD_HEADER): the caller was bundled with
+  // another build, so its arguments may not be what this build's function
+  // takes, nor its decoder what this build's result is. Refused before the
+  // arguments are parsed or the function runs. After the origin gate, unlike
+  // the unknown-id 404: only the client runtime sends the header, and it
+  // sends the fetch metadata the gate reads. Labelled as unknown so the
+  // client reports one skew signal: this page came from another build.
+  const callerBuild = request.headers.get(BUILD_HEADER);
+  if (config.buildId && callerBuild !== null && callerBuild !== config.buildId) {
+    return finish(
+      new Response(
+        DEV
+          ? `Server function call from build "${callerBuild}" refused by build "${config.buildId}"`
+          : null,
+        {
+          status: 409,
+          headers: {
+            [UNKNOWN_HEADER]: "true",
+            [BUILD_HEADER]: config.buildId,
+            "Cache-Control": "no-store"
+          }
+        }
+      )
+    );
+  }
 
   // Which of the three answer shapes this call gets — codec encodings for
   // the client transport, the same encodings framed as an event stream for
@@ -4117,6 +4696,7 @@ export async function handleServerFunctionRequest(request, options = {}) {
     );
     return finish(protectsRequest ? withCSRFVary(response) : response);
   }
+  let argumentBytes = null;
   if (method === "POST" && request.body !== null && bodySizeLimit !== Infinity) {
     // The one thing a declaration is good for: a CONFORMING one — digits,
     // per RFC 9110 §8.6 (the bare Number() parse lost that: Number("-1")
@@ -4165,6 +4745,7 @@ export async function handleServerFunctionRequest(request, options = {}) {
       return finish(protectsRequest ? withCSRFVary(response) : response);
     }
     request = withBufferedBody(request, buffered);
+    argumentBytes = buffered;
   }
 
   // An async createEvent is out of contract (the type is synchronous), but
@@ -4204,8 +4785,27 @@ export async function handleServerFunctionRequest(request, options = {}) {
   // the next request carried stale credentials with the failure pointing at
   // the wrong place. Committing here also arms the stub's late-write
   // instrumentation, same as the dispatch tail.
+  //
+  // The commit is also where the request's trace reaches the head
+  // (`Server-Timing`, see ../../src/trace.ts) — except on a read a shared
+  // cache may store (#3985): that one answer is replayed to every viewer,
+  // and handing each of them the trace of the request that filled the cache
+  // would parent every viewer's browser spans to it. Decided BEFORE the
+  // commit, from the `Cache-Control` the response will leave with, so no
+  // trace byte is ever written there; `getTraceContext()` still answers the
+  // function body and anything forwarding the trace downstream.
+  const commitResponse = raw => {
+    if (
+      (method === "GET" || method === "HEAD") &&
+      (sharedCacheMayStore(departingHeader(raw, event, "Cache-Control")) ||
+        cdnMayStore(departingHeader(raw, event, "CDN-Cache-Control")))
+    ) {
+      withholdTrace(event);
+    }
+    return commitEventResponse(raw, event);
+  };
   const refuseCommitted = raw => {
-    const response = commitEventResponse(raw, event);
+    const response = commitResponse(raw);
     return finish(protectsRequest ? withCSRFVary(response) : response);
   };
   const provide = options.provideEvent || provideEvent;
@@ -4295,16 +4895,20 @@ export async function handleServerFunctionRequest(request, options = {}) {
 
   let parsed;
   try {
-    parsed = await parseArguments(request, url, scripted, codec);
+    parsed = await parseArguments(request, url, scripted, codec, argumentBytes);
   } catch (error) {
     // A query that is not the encoding it claims to be is a malformed
     // request, not a failing call: 400 keeps it out of the function's error
     // channel, and answers the same way for every caller of that url. The
     // unknown-tag refusal carries its own development message: version skew
-    // has a recovery (redeploy, reload) worth naming (#3245).
-    const skewed = error !== null && typeof error === "object" && error[FORMAT_SKEW] === true;
+    // has a recovery (redeploy, reload) worth naming (#3245). So does a
+    // refused argument type: the fix is at the call site.
+    const named =
+      error !== null && typeof error === "object" && error[FORMAT_SKEW] === true
+        ? error
+        : refusedArgument(error);
     const response = new Response(
-      DEV ? (skewed ? error.message : "Malformed server function arguments") : null,
+      DEV ? (named ? named.message : "Malformed server function arguments") : null,
       { status: 400 }
     );
     return refuseCommitted(response);
@@ -4354,7 +4958,13 @@ export async function handleServerFunctionRequest(request, options = {}) {
         // Identity is established BEFORE the wrapper runs, so
         // getServerFunctionInvocation() answers throughout the wrap — code
         // ahead of run() (auth, logging) included.
-        INVOCATIONS.set(event, { id: functionId, live: !!live });
+        const shared = !!live && BROADCASTS.has(functionId);
+        INVOCATIONS.set(event, {
+          id: functionId,
+          live: !!live,
+          broadcast: shared || undefined,
+          shareKey: shared ? encodedArguments(request, url, argsEncoding, argumentBytes) : undefined
+        });
         const run = () => serverFunction(...parsed);
         // Same observation as the direct leg (see `observeInvocation`): the
         // wrapped execution as a whole, the error as thrown — before the
@@ -4379,8 +4989,10 @@ export async function handleServerFunctionRequest(request, options = {}) {
       if (isResponseEnvelope(result)) {
         const { response, value } = result;
         // consumers without the client runtime get the carried response
-        // whole — e.g. respond()'s real JSON body (invisible PE)
-        if (!scripted && !handleNoJS && response && response.body) {
+        // whole — e.g. respond()'s real JSON body (invisible PE) — when JSON
+        // carries the value faithfully; otherwise the value negotiates like
+        // a plain return below (a bigint would error that body, #4060)
+        if (!scripted && !handleNoJS && response && response.body && isJSONSafe(value)) {
           return response;
         }
         if (response && response.headers) {
@@ -4457,11 +5069,8 @@ export async function handleServerFunctionRequest(request, options = {}) {
         // to prefer, a returned `null` passes through as the outcome it is
         // rather than eroding to `undefined` on the way to the flash (#3248).
         if (handleNoJS) {
-          return handleNoJS(
-            result == null && metadata !== undefined ? metadata : result,
-            request,
-            parsed
-          );
+          const outcome = result == null && metadata !== undefined ? metadata : result;
+          return withEnvelopeCookies(await handleNoJS(outcome, request, parsed), outcome, metadata);
         }
         if (result instanceof Response) return result;
         // the envelope's status forwards for unscripted callers too — this
@@ -4474,7 +5083,20 @@ export async function handleServerFunctionRequest(request, options = {}) {
       // only: a refusal or a thrown outcome is a whole answer, delivered as
       // the ordinary scripted encoding (the loop's reader is chosen off the
       // content type, so it reads either).
-      if (live) return encodeLiveResult(result, headers, status, codec, request, scope);
+      if (live) {
+        const invocation = INVOCATIONS.get(event);
+        return encodeLiveResult(
+          result,
+          headers,
+          status,
+          codec,
+          request,
+          scope,
+          invocation && invocation.broadcast && invocation.shareKey !== undefined
+            ? invocation.id + "\0" + invocation.shareKey
+            : undefined
+        );
+      }
       return encodeResult(result, headers, status, codec, request.signal, scope);
     } catch (x) {
       // Plain-thrown tail, hoisted so the thrown-path transformResult can
@@ -4599,7 +5221,14 @@ export async function handleServerFunctionRequest(request, options = {}) {
           // `x` was nulled when the thrown Response had no body, but the no-JS
           // handler reads redirect metadata off the result — hand it the
           // original Response, matching what the returned path passes.
-          if (handleNoJS) return handleNoJS(x ?? metadata, request, parsed, true);
+          if (handleNoJS) {
+            const outcome = x ?? metadata;
+            return withEnvelopeCookies(
+              await handleNoJS(outcome, request, parsed, true),
+              outcome,
+              metadata
+            );
+          }
           if (x instanceof Response) return x;
         }
         if (scripted && status === 304) warnScripted304(functionId);
@@ -4619,11 +5248,105 @@ export async function handleServerFunctionRequest(request, options = {}) {
   // mutate freely instead of auditing every write site, and covers every
   // foreign-response path at once (raw passthrough, unscripted returns and
   // throws, custom handleNoJS results, envelope-carried responses).
-  const response = commitEventResponse(
-    enforceComposedHeaderInvariants(ownResponse(await dispatch())),
-    event
-  );
+  const response = commitResponse(enforceComposedHeaderInvariants(ownResponse(await dispatch())));
   return finish(protectsRequest ? withCSRFVary(response) : response);
+}
+
+// A header a response leaves the handler with: its own, else the event
+// stub's — `commitEventResponse` gap-fills a stub header the response does
+// not answer, and an already-committed stub folds nothing. The transport
+// tail only ever adds `Cache-Control: no-store` where neither said anything.
+function departingHeader(response, event, name) {
+  const own = response.headers.get(name);
+  if (own !== null) return own;
+  const stub = event.response;
+  return stub && stub.headers && !stub.committed ? stub.headers.get(name) : null;
+}
+
+// A CDN that honours `CDN-Cache-Control` (RFC 9213) reads it in place of
+// `Cache-Control`, and a CDN is a shared cache: a present field it may store
+// under — anything but `no-store` or an unqualified `private` — lets it keep
+// the response whatever `Cache-Control` tells browsers.
+function cdnMayStore(cdnCacheControl) {
+  return cdnCacheControl !== null && !forbidsStoring(cdnCacheControl);
+}
+
+// Whether a shared cache may store a response under `cacheControl` — the
+// author asked for one with `public` or `s-maxage` (#3985). Directives are
+// matched whole and case-insensitively (RFC 9111 §5.2), never as substrings,
+// and a quoted argument may carry commas. What forbids a shared cache wins
+// over what asks for one: `no-store` (no cache may keep it), and an
+// unqualified `private` (§5.2.2.7: a shared cache MUST NOT store it, whatever
+// `s-maxage` says — the response stays one viewer's, so its trace stays
+// too). A qualified `private="…"` keeps only the named fields out of a shared
+// cache, so the rest of the response — `Server-Timing` included — may still
+// be stored.
+function sharedCacheMayStore(cacheControl) {
+  let shared = false;
+  return (
+    !!cacheControl &&
+    !eachDirective(cacheControl, name => {
+      if (name === "public" || name === "s-maxage") shared = true;
+    }) &&
+    shared
+  );
+}
+
+// `no-store` or an unqualified `private`.
+function forbidsStoring(value) {
+  return eachDirective(value, () => {});
+}
+
+// Walks `value`'s directives (names matched whole and lower-cased, quoted
+// arguments may carry commas), handing each name to `visit`; true as soon
+// as one forbids storing — `no-store` or an unqualified `private`.
+function eachDirective(value, visit) {
+  let start = 0;
+  let quoted = false;
+  for (let i = 0; i <= value.length; i++) {
+    const c = value[i];
+    if (quoted) {
+      if (c === "\\") i++;
+      else if (c === '"') quoted = false;
+      continue;
+    }
+    if (c === '"') {
+      quoted = true;
+      continue;
+    }
+    if (c !== "," && i < value.length) continue;
+    const directive = value.slice(start, i);
+    start = i + 1;
+    const eq = directive.indexOf("=");
+    const name = (eq === -1 ? directive : directive.slice(0, eq)).trim().toLowerCase();
+    if (name === "no-store" || (name === "private" && eq === -1)) return true;
+    visit(name);
+  }
+  return false;
+}
+
+// The request's trace stays off this response's head: the record's `emit`
+// is what `appendTraceServerTiming` reads at commit (the record is shared
+// across bundle copies, so the commit seam's copy sees it). Every entry
+// goes — `traceparent` and a provider's vendor pair alike — while the
+// context itself is untouched for `getTraceContext()`. Nothing to withhold
+// once the stub has committed: its head already left.
+function withholdTrace(event) {
+  if (event.response && event.response.committed) return;
+  traceForEvent(event).emit = false;
+}
+
+// The no-JS handler sees only an envelope's value, so carry its cookies.
+function withEnvelopeCookies(response, outcome, metadata) {
+  if (outcome === metadata || !metadata || !metadata.headers || !(response instanceof Response)) {
+    return response;
+  }
+  const cookies = metadata.headers.getSetCookie ? metadata.headers.getSetCookie() : [];
+  if (!cookies.length) return response;
+  const owned = ownResponse(response);
+  if (owned === response) return response;
+  for (const cookie of cookies) owned.headers.append("Set-Cookie", cookie);
+  return owned;
 }
 
 // A fresh Response around the same body: status, statusText and headers are
@@ -4653,6 +5376,9 @@ function ownResponse(response) {
  * - HEAD responses drop their body, as HTTP requires — the function still
  *   ran (HEAD is gated identically to GET), so status and headers are those
  *   of the equivalent GET (#3069).
+ * - `X-Content-Type-Options: nosniff` unless the function set its own: a
+ *   body is read as the type its `Content-Type` names, and one without a
+ *   type (bytes, an untyped Blob) is never content-sniffed into a document.
  */
 function finalizeTransportResponse(response, method) {
   const stripBody = method === "HEAD" && response.body !== null;
@@ -4667,10 +5393,14 @@ function finalizeTransportResponse(response, method) {
   // minimal correct 304 the dev warning's own advice leads to. 204/205 are
   // ordinary answers, not cache updates, and keep the default.
   const defaultsCache = !response.headers.has("Cache-Control") && response.status !== 304;
-  if (stripBody || defaultsCache) {
+  const defaultsSniff = !response.headers.has("X-Content-Type-Options");
+  if (stripBody || defaultsCache || defaultsSniff) {
     try {
       if (defaultsCache) {
         response.headers.set("Cache-Control", "no-store");
+      }
+      if (defaultsSniff) {
+        response.headers.set("X-Content-Type-Options", "nosniff");
       }
       if (!stripBody) return response;
       // discard, don't leak: the encoded body may be a live codec stream
@@ -4684,6 +5414,9 @@ function finalizeTransportResponse(response, method) {
       // immutable headers (e.g. a raw fetch() Response passed through)
       const headers = new Headers(response.headers);
       if (defaultsCache && !headers.has("Cache-Control")) headers.set("Cache-Control", "no-store");
+      if (defaultsSniff && !headers.has("X-Content-Type-Options")) {
+        headers.set("X-Content-Type-Options", "nosniff");
+      }
       if (stripBody) response.body.cancel().catch(() => {});
       return new Response(stripBody ? null : response.body, {
         status: response.status,

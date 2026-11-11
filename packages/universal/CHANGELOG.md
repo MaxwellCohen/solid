@@ -1,5 +1,127 @@
 # @solidjs/universal
 
+## 2.0.0-rc.21
+
+### Patch Changes
+
+- Updated dependencies [46ab2dd]
+- Updated dependencies [61bb177]
+- Updated dependencies [25fb7be]
+- Updated dependencies [0d4c5e0]
+- Updated dependencies [84353de]
+- Updated dependencies [99d9821]
+  - solid-js@2.0.0-rc.21
+
+## 2.0.0-rc.20
+
+### Patch Changes
+
+- Updated dependencies [178605c]
+- Updated dependencies [17ec571]
+- Updated dependencies [178605c]
+- Updated dependencies [df2ba6c]
+- Updated dependencies [c7f4403]
+- Updated dependencies [ffe0c1c]
+- Updated dependencies [bd95616]
+- Updated dependencies [38e0c49]
+- Updated dependencies [1f558e5]
+- Updated dependencies [56a982c]
+- Updated dependencies [5d57e12]
+  - solid-js@2.0.0-rc.20
+
+## 2.0.0-rc.19
+
+### Patch Changes
+
+- bae59bd: A dynamic child region of a universal-renderer element that renders an empty fragment (for example a `<Show>` with `fallback={<></>}`) no longer loses its place among its siblings: the region now keeps its sentinel while empty, so the content that later replaces it is inserted where the region sits instead of being appended after the following siblings (#4274).
+- Updated dependencies [2a0da2f]
+- Updated dependencies [0090fe3]
+- Updated dependencies [ee94440]
+- Updated dependencies [f5cf675]
+- Updated dependencies [8f1d9d2]
+- Updated dependencies [8f1d9d2]
+- Updated dependencies [0856fee]
+- Updated dependencies [542ff6f]
+- Updated dependencies [2c9fdd9]
+- Updated dependencies [e0e4224]
+- Updated dependencies [e0e4224]
+- Updated dependencies [1d6c40f]
+- Updated dependencies [8f1d9d2]
+- Updated dependencies [6d6f03f]
+- Updated dependencies [e0e4224]
+- Updated dependencies [87934c1]
+- Updated dependencies [2c9fdd9]
+  - solid-js@2.0.0-rc.19
+
+## 2.0.0-rc.18
+
+### Patch Changes
+
+- Updated dependencies [50a810b]
+- Updated dependencies [f373683]
+- Updated dependencies [ec4483d]
+- Updated dependencies [4645cff]
+- Updated dependencies [aece1d4]
+  - solid-js@2.0.0-rc.18
+
+## 2.0.0-rc.17
+
+### Patch Changes
+
+- Updated dependencies [db8241c]
+- Updated dependencies [690228a]
+- Updated dependencies [a2a5b6f]
+- Updated dependencies [0771dc8]
+- Updated dependencies [d682022]
+- Updated dependencies [6cca8b5]
+  - solid-js@2.0.0-rc.17
+
+## 2.0.0-rc.16
+
+### Patch Changes
+
+- Updated dependencies [3d8a8a9]
+- Updated dependencies [1b81476]
+- Updated dependencies [b8617ec]
+- Updated dependencies [4a99c84]
+- Updated dependencies [0f64d82]
+- Updated dependencies [467ac97]
+- Updated dependencies [1bcee91]
+- Updated dependencies [47a217f]
+- Updated dependencies [dbc5d00]
+- Updated dependencies [7c36f2b]
+- Updated dependencies [0a49dd8]
+- Updated dependencies [51d005a]
+- Updated dependencies [c5da908]
+- Updated dependencies [3f36f77]
+- Updated dependencies [eb4e019]
+- Updated dependencies [dfb31ed]
+- Updated dependencies [9ac1481]
+- Updated dependencies [a61c929]
+- Updated dependencies [3d8a8a9]
+- Updated dependencies [3d8a8a9]
+- Updated dependencies [4ff6580]
+  - solid-js@2.0.0-rc.16
+
+## 2.0.0-rc.15
+
+### Patch Changes
+
+- Updated dependencies [4afc662]
+- Updated dependencies [b460640]
+- Updated dependencies [39450e5]
+- Updated dependencies [cbd66e5]
+- Updated dependencies [b083833]
+- Updated dependencies [5413c06]
+- Updated dependencies [0c4bff7]
+- Updated dependencies [25935fe]
+- Updated dependencies [b749474]
+- Updated dependencies [234cfc9]
+- Updated dependencies [d966729]
+- Updated dependencies [a405039]
+- Updated dependencies [234cfc9]
+  - solid-js@2.0.0-rc.15
+
 ## 2.0.0-rc.14
 
 ### Patch Changes

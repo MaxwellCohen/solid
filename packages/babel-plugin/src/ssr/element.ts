@@ -21,11 +21,18 @@ import {
   canChildSlotAllocateIds,
   isFunctionShapedHole,
   isEventName,
-  toEventName
+  isImportExpression
 } from "../shared/utils";
 import { transformNode, getCreateTemplate } from "../shared/transform";
 import { decodedAttrValue } from "../universal/element";
-import { createTemplate, linkAttrsKey, registerLinkAttrs, registerSkip } from "./template";
+import {
+  asciiAttributeMarkup,
+  createTemplate,
+  rawTextElements,
+  linkAttrsKey,
+  registerLinkAttrs,
+  registerSkip
+} from "./template";
 import { markPropsLiteral } from "./props";
 import type {
   BabelPath,
@@ -192,7 +199,14 @@ export function transformElement(
     });
 
   const config = getConfig(path);
-  if (tagName === "script" || tagName === "style") path.doNotEscape = true;
+  // HTML-namespace `<script>`/`<style>` are raw text. Under `<svg>`/`<math>`
+  // they are ordinary elements whose text parses as markup, so it escapes
+  // (marked in preprocess).
+  if (
+    (tagName === "script" || tagName === "style") &&
+    !(path.node as { _foreignContent?: boolean })._foreignContent
+  )
+    path.doNotEscape = true;
 
   // A `<select value=…>` (or a spread that could carry one) opts this module
   // into the runtime's SSR select-value resolution pass. The pass is a
@@ -310,6 +324,16 @@ function setAttr(
   }
 }
 
+/**
+ * How `escapeExpression` treats a string literal it reaches.
+ * - `undefined`: the hole itself. The caller escapes a literal when it
+ *   inlines it into the template, so it stays as written here.
+ * - `"escape"`: a position whose value the runtime writes as is.
+ * - `"keep"`: inside a function value in an attribute. `ssrAttribute`
+ *   stringifies the function's source, so literals stay as written.
+ */
+type Literals = "escape" | "keep" | undefined;
+
 function escapeExpression(
   path: BabelPath,
   expression:
@@ -319,37 +343,35 @@ function escapeExpression(
     | null
     | undefined,
   attr?: boolean,
-  escapeLiterals?: boolean
+  literals?: Literals
 ): babelTypes.Expression | babelTypes.JSXElement | babelTypes.JSXFragment | null | undefined {
   if (!expression) return expression;
+  // A literal in a branch is the hole's value, which `ssr` and
+  // `ssrAttribute` write as is, so branches escape literals.
+  const branch: Literals = literals === "keep" ? "keep" : "escape";
+  // A function's returns escape like branches, except for a function value in
+  // an attribute: `ssrAttribute` stringifies its source, so its literals stay
+  // as written at every depth.
+  const returns: Literals = literals === undefined && attr ? "keep" : branch;
   if (
     t.isStringLiteral(expression) ||
     t.isNumericLiteral(expression) ||
     (t.isTemplateLiteral(expression) && expression.expressions.length === 0)
   ) {
-    if (escapeLiterals) {
+    if (literals === "escape") {
       if (t.isStringLiteral(expression))
         return t.stringLiteral(escapeHTML(expression.value, attr) as string);
       else if (t.isTemplateLiteral(expression))
-        return t.stringLiteral(escapeHTML(expression.quasis[0].value.raw, attr) as string);
+        return t.stringLiteral(
+          escapeHTML(
+            expression.quasis[0].value.cooked ?? expression.quasis[0].value.raw,
+            attr
+          ) as string
+        );
     }
     return expression;
   } else if (t.isFunction(expression)) {
-    if (t.isBlockStatement(expression.body)) {
-      expression.body.body = expression.body.body.map(e => {
-        if (t.isReturnStatement(e))
-          e.argument = escapeExpression(
-            path,
-            e.argument,
-            attr,
-            escapeLiterals
-          ) as babelTypes.Expression | null;
-        return e;
-      });
-    } else
-      expression.body = escapeExpression(path, expression.body, attr, escapeLiterals) as
-        | babelTypes.Expression
-        | babelTypes.BlockStatement;
+    escapeFunctionResult(path, expression, attr, returns);
     return expression;
   } else if (t.isTemplateLiteral(expression)) {
     // Interpolations are escaped recursively. The static quasis are not —
@@ -359,12 +381,7 @@ function escapeExpression(
     if (attr) escapeTemplateQuasis(expression, true);
     expression.expressions = expression.expressions.map(
       e =>
-        escapeExpression(
-          path,
-          e as babelTypes.Expression,
-          attr,
-          escapeLiterals
-        ) as babelTypes.Expression
+        escapeExpression(path, e as babelTypes.Expression, attr, literals) as babelTypes.Expression
     );
     return expression;
   } else if (t.isUnaryExpression(expression)) {
@@ -374,13 +391,13 @@ function escapeExpression(
       path,
       expression.left as babelTypes.Expression,
       attr,
-      escapeLiterals
+      literals
     ) as babelTypes.Expression | babelTypes.PrivateName;
     expression.right = escapeExpression(
       path,
       expression.right,
       attr,
-      escapeLiterals
+      literals
     ) as babelTypes.Expression;
     return expression;
   } else if (t.isConditionalExpression(expression)) {
@@ -388,13 +405,13 @@ function escapeExpression(
       path,
       expression.consequent,
       attr,
-      escapeLiterals
+      branch
     ) as babelTypes.Expression;
     expression.alternate = escapeExpression(
       path,
       expression.alternate,
       attr,
-      escapeLiterals
+      branch
     ) as babelTypes.Expression;
     return expression;
   } else if (t.isLogicalExpression(expression)) {
@@ -405,29 +422,14 @@ function escapeExpression(
         path,
         expression.right,
         attr,
-        escapeLiterals
+        branch
       ) as babelTypes.Expression;
       return expression;
     }
   } else if (t.isCallExpression(expression) && t.isFunction(expression.callee)) {
-    if (t.isBlockStatement(expression.callee.body)) {
-      expression.callee.body.body = expression.callee.body.body.map(e => {
-        if (t.isReturnStatement(e))
-          e.argument = escapeExpression(
-            path,
-            e.argument,
-            attr,
-            escapeLiterals
-          ) as babelTypes.Expression | null;
-        return e;
-      });
-    } else
-      expression.callee.body = escapeExpression(
-        path,
-        expression.callee.body,
-        attr,
-        escapeLiterals
-      ) as babelTypes.Expression | babelTypes.BlockStatement;
+    // The call's result is the hole's value, so its returns escape like
+    // branches.
+    escapeFunctionResult(path, expression.callee, attr, branch);
     return expression;
   } else if (t.isJSXElement(expression) && !isComponent(getTagName(expression))) {
     (expression as babelTypes.JSXElement & { wontEscape?: boolean }).wontEscape = true;
@@ -445,6 +447,59 @@ function escapeExpression(
     registerImportMethod(path, "escape"),
     [expression as babelTypes.Expression].concat(attr ? [t.booleanLiteral(true)] : [])
   );
+}
+
+/** Escapes a function's expression body or its `return` arguments. */
+function escapeFunctionResult(
+  path: BabelPath,
+  fn: babelTypes.Function,
+  attr: boolean | undefined,
+  literals: Literals
+) {
+  if (t.isBlockStatement(fn.body)) escapeReturns(path, fn.body, attr, literals);
+  else
+    fn.body = escapeExpression(path, fn.body, attr, literals) as
+      | babelTypes.Expression
+      | babelTypes.BlockStatement;
+}
+
+/**
+ * Escapes the `return` arguments in a statement at any depth, without
+ * entering nested functions or classes.
+ */
+function escapeReturns(
+  path: BabelPath,
+  statement: babelTypes.Statement | null | undefined,
+  attr: boolean | undefined,
+  literals: Literals
+) {
+  if (!statement) return;
+  if (t.isReturnStatement(statement)) {
+    statement.argument = escapeExpression(
+      path,
+      statement.argument,
+      attr,
+      literals
+    ) as babelTypes.Expression | null;
+  } else if (t.isBlockStatement(statement)) {
+    for (const child of statement.body) escapeReturns(path, child, attr, literals);
+  } else if (t.isIfStatement(statement)) {
+    escapeReturns(path, statement.consequent, attr, literals);
+    escapeReturns(path, statement.alternate, attr, literals);
+  } else if (t.isSwitchStatement(statement)) {
+    for (const switchCase of statement.cases)
+      for (const child of switchCase.consequent) escapeReturns(path, child, attr, literals);
+  } else if (t.isTryStatement(statement)) {
+    escapeReturns(path, statement.block, attr, literals);
+    escapeReturns(path, statement.handler?.body, attr, literals);
+    escapeReturns(path, statement.finalizer, attr, literals);
+  } else if (
+    t.isLoop(statement) ||
+    t.isLabeledStatement(statement) ||
+    t.isWithStatement(statement)
+  ) {
+    escapeReturns(path, statement.body as babelTypes.Statement, attr, literals);
+  }
 }
 
 function escapeTemplateQuasis(expression: babelTypes.TemplateLiteral, attr: boolean) {
@@ -641,13 +696,6 @@ function transformAttributes(
   // holes evaluated. The hole never takes a hydration id.
   const linkEntries: LinkClaimEntry[] | null =
     tagName === "a" && isLinkClaimCandidate(attributes) ? [] : null;
-  // Server-components handler positions: ref/on* expressions on
-  // server-rendered intrinsics collect here and emit as one guarded
-  // whole-attribute hole after the loop, where `ssrClaim` turns attribute-slot
-  // reads into `_s:on:*` / `_s:ref` markers (and drops server-local
-  // functions). Evaluation is gated on the render context's claims flag so
-  // plain SSR never runs the expressions.
-  const claims: [string, babelTypes.Expression][] = [];
 
   attributes.forEach(attribute => {
     if (!t.isJSXAttribute(attribute.node)) return;
@@ -678,23 +726,13 @@ function transformAttributes(
     ) {
       if (t.isJSXEmptyExpression(value.expression)) return;
       if (key === "ref") {
-        if (info.serverComponents) {
-          claims.push(["ref", value.expression as babelTypes.Expression]);
-          return;
-        }
         results.declarations.push(
           t.variableDeclarator(path.scope.generateUidIdentifier("_ref$"), value.expression)
         );
         return;
       }
       if (key.startsWith("prop:")) return;
-      if (isEventName(key)) {
-        // `onXxx` lowercases to the event name — the client runtime's own
-        // derivation (`onClick` -> `click`); the position is bound under it.
-        if (info.serverComponents)
-          claims.push([toEventName(key), value.expression as babelTypes.Expression]);
-        return;
-      }
+      if (isEventName(key)) return;
       if (ChildProperties.has(key)) {
         if (key === "children" && VoidElements.has(tagName)) return;
         if (info.hydratable && key === "textContent" && value && value.expression) {
@@ -742,30 +780,9 @@ function transformAttributes(
           value.expression = t.assignmentExpression("=", temp, expression);
           linkEntries.push([key, t.cloneNode(temp), !!isDynamicValue]);
         }
-        // Server components (principles §9.2.3) need a whole-attribute
-        // serializer that can emit a position marker for a binding-slot
-        // value. The ordinary class/style serializers cannot bind slots.
-        // Object literals stay objects (no inlining) so a slot used as a
-        // property's value can also emit its marker.
-        if (info.serverComponents && (key === "class" || key === "style")) {
-          const attr = t.callExpression(registerImportMethod(path, "ssrElementAttribute"), [
-            t.stringLiteral(key),
-            value.expression as babelTypes.Expression
-          ]);
-          results.template.push("");
-          results.templateValues.push(
-            isDynamicValue
-              ? hoistExpression(path, results, t.arrowFunctionExpression([], attr), {
-                  group: true
-                })
-              : attr
-          );
-          return;
-        }
         if ((key === "class" || key === "style") && !t.isObjectExpression(value.expression)) {
-          // The whole attribute must be absent for nullish values. Keep the
-          // ordinary serializers: ssrElementAttribute would also bind slots
-          // without serverComponents. Capture the value once before testing it.
+          // The whole attribute must be absent for nullish values. Capture the
+          // value once before testing it.
           const id = path.scope.generateUidIdentifier("v$");
           const attr = t.callExpression(
             t.arrowFunctionExpression(
@@ -843,7 +860,7 @@ function transformAttributes(
                   path,
                   p.value as babelTypes.Expression,
                   true,
-                  true
+                  "escape"
                 ) as babelTypes.Expression
               ];
             });
@@ -974,28 +991,6 @@ function transformAttributes(
     results.template.push("");
     results.templateValues.push(hole);
   }
-  if (claims.length) {
-    const map = claimMap(claims);
-    // `_$sharedConfig.context && _$sharedConfig.context.claims
-    //    ? _$ssrClaim({...}) : ""`
-    // — the claims flag is only set inside a server component's render
-    // scope (and cleared inside suppressed fill windows), so ordinary SSR
-    // pays the property reads and never evaluates the expressions.
-    const sharedConfigId = registerImportMethod(path, "sharedConfig");
-    const contextRead = () =>
-      t.memberExpression(t.cloneNode(sharedConfigId), t.identifier("context"));
-    const guarded = t.conditionalExpression(
-      t.logicalExpression(
-        "&&",
-        contextRead(),
-        t.memberExpression(contextRead(), t.identifier("claims"))
-      ),
-      t.callExpression(registerImportMethod(path, "ssrClaim"), [map]),
-      t.stringLiteral("")
-    );
-    results.template.push("");
-    results.templateValues.push(hoistExpression(path, results, guarded));
-  }
   if (!hasChildren && children) {
     path.node.children.push(children);
   }
@@ -1121,7 +1116,7 @@ function transformChildren(
 
 function createElement(
   path: BabelPath<babelTypes.JSXElement> & { doNotEscape?: boolean },
-  { topLevel, hydratable, serverComponents }: SSRTransformInfo
+  { topLevel, hydratable }: SSRTransformInfo
 ): SSRSpreadTransformResult {
   const tagName = getTagName(path.node),
     config = getConfig(path),
@@ -1144,6 +1139,7 @@ function createElement(
         const allocatesIds = hydratable && canChildSlotAllocateIds(path);
         const child = transformNode(path, { doNotEscape });
         if (!child) return memo;
+        if (rawTextElements.has(tagName)) child.rawText = true;
         if (markers && child.exprs.length && !child.spreadElement)
           memo.push(t.stringLiteral("<!--$-->"));
         if (child.exprs.length && !doNotEscape && !child.spreadElement)
@@ -1174,22 +1170,6 @@ function createElement(
     const node = attribute.node;
     return !(t.isJSXAttribute(node) && t.isJSXIdentifier(node.name) && node.name.name === "ref");
   });
-  // Server components (principles §9.2.3): the named `ref`/`on*` attributes
-  // of a spread element are handler positions like a template element's,
-  // and compile to the same claim map — `{ click: expr, ref: [a, b] }`,
-  // duplicate refs merged, a duplicate handler last-wins as the template
-  // path strips it — keyed by the index of the source each attribute sits
-  // before (`<b {...a} onClick={go} {...b}>` → `{ 1: { click: go } }`, the
-  // spreads being sources 0 and 2), and handed to `ssrElement` as a thunk
-  // it reads only inside a server component's render (the gate the template
-  // path's `ssrClaim` guard reads), so plain SSR never evaluates the
-  // expressions. The runtime settles each handler position in source order,
-  // as the client's `spread(el, [a, { onClick: go }, b])` does — a spread at
-  // that index or later that HAS the key owns it — and merges every ref.
-  // Plain SSR output is unchanged (dropped, as a server element has no
-  // handlers to run).
-  const claims: [number, string, babelTypes.Expression][] = [];
-
   let props: babelTypes.Expression[];
   // Attributes written AFTER the last spread are markup, not a source: no
   // later source can override them, so they go to `ssrElement` as its
@@ -1209,14 +1189,35 @@ function createElement(
   // keys.
   const tail: Array<string | babelTypes.Expression> = [];
   const skipKeys: string[] = [];
-  if (
-    propAttributes.length === 1 &&
-    t.isJSXSpreadAttribute(propAttributes[0].node) &&
-    // A `ref` beside the lone spread is a claim under `serverComponents`;
-    // the loop below places it.
-    !(serverComponents && attributes.length > 1)
-  ) {
-    props = [propAttributes[0].node.argument];
+  // Plain SSR evaluates a named `ref` expression without calling the ref, as
+  // the template path does (`_ref$ = expr`), so a ref factory's owned setup
+  // (`ref={tooltip()}`) runs on both sides and the hydration ids after it
+  // line up (#4081). The client evaluates it after applying the spread and
+  // before the children; `ssrElement` calls the `attrs` thunk at that point.
+  // Only an expression that calls something can run setup: `ref={el}` and
+  // `ref={props.ref}` stay out of the thunk.
+  const refs: babelTypes.Expression[] = [];
+  for (const attribute of attributes) {
+    const node = attribute.node;
+    if (
+      t.isJSXAttribute(node) &&
+      t.isJSXIdentifier(node.name, { name: "ref" }) &&
+      t.isJSXExpressionContainer(node.value) &&
+      !t.isJSXEmptyExpression(node.value.expression) &&
+      callsOutsideFunctions(node.value.expression)
+    )
+      refs.push(node.value.expression);
+  }
+  if (propAttributes.length === 1 && t.isJSXSpreadAttribute(propAttributes[0].node)) {
+    // A lone dynamic spread defers behind a thunk too (#4240): see the
+    // source loop below. `ssrElement` calls a function props argument after
+    // allocating the key.
+    const argument = propAttributes[0].node.argument;
+    props = [
+      isDynamic(propAttributes[0].get("argument"), { checkMember: true })
+        ? inlineCallExpression(argument)
+        : argument
+    ];
   } else {
     props = [];
     let runningObject: Array<babelTypes.ObjectProperty | babelTypes.ObjectMethod> = [],
@@ -1261,28 +1262,7 @@ function createElement(
             : node.name.name;
 
         if (hasChildren && key === "children") return;
-        if (key === "ref" || isEventName(key)) {
-          if (serverComponents && t.isJSXExpressionContainer(value)) {
-            const expression = value.expression;
-            const pos = key === "ref" ? "ref" : toEventName(key);
-            if (
-              !(
-                t.isJSXEmptyExpression(expression) ||
-                t.isStringLiteral(expression) ||
-                t.isNumericLiteral(expression) ||
-                t.isBooleanLiteral(expression)
-              )
-            ) {
-              // The index of the source this attribute sits before: the
-              // sources pushed so far, plus the running literal if it will
-              // be pushed ahead of the next spread. The literal never
-              // carries a handler key, so a spread's index is either below
-              // this or at/after it — never ambiguous.
-              claims.push([props.length + (runningObject.length ? 1 : 0), pos, expression]);
-            }
-          }
-          return;
-        }
+        if (key === "ref" || isEventName(key)) return;
         if (key.startsWith("prop:")) return;
         // An anchor's link-relevant attributes stay a source, never baked
         // markup: `ssrElement` collects them from the walk for the render's
@@ -1351,76 +1331,53 @@ function createElement(
   // set) and attribute string — a literal when every part is static, else a
   // thunk concatenating the parts in source order. A `false` static bakes to
   // no markup but still skips its key.
-  if (skipKeys.length) {
+  if (skipKeys.length || refs.length) {
     let markup: babelTypes.Expression;
-    if (tail.every(part => typeof part === "string")) markup = t.stringLiteral(tail.join(""));
-    else {
+    if (tail.every(part => typeof part === "string")) {
+      markup = t.stringLiteral(tail.join(""));
+      // The refs run after the tail's (static) markup and return it.
+      if (refs.length)
+        markup = t.arrowFunctionExpression([], t.sequenceExpression([...refs, markup]));
+    } else {
       let concat: babelTypes.Expression | undefined;
       for (const part of tail) {
         const expr = typeof part === "string" ? t.stringLiteral(part) : part;
         concat = concat ? t.binaryExpression("+", concat, expr) : expr;
       }
+      // The tail's getters run first, as the client applies them with the
+      // spread before it evaluates the ref: `markup + (ref, "")`.
+      if (refs.length)
+        concat = t.binaryExpression(
+          "+",
+          concat!,
+          t.sequenceExpression([...refs, t.stringLiteral("")])
+        );
       markup = t.arrowFunctionExpression([], concat!);
     }
-    args.push(registerSkip(path, skipKeys), markup);
-  }
-  if (claims.length) {
-    if (!skipKeys.length) args.push(t.identifier("undefined"), t.identifier("undefined"));
-    args.push(t.arrowFunctionExpression([], claimSegments(claims)));
+    args.push(skipKeys.length ? registerSkip(path, skipKeys) : t.identifier("undefined"), markup);
   }
   const exprs = [t.callExpression(registerImportMethod(path, "ssrElement"), args)];
   return { exprs, template: "", declarations: [], dynamics: [], spreadElement: true };
 }
 
-/**
- * A spread element's claim map by source index (`createElement`): `{ 1: {
- * click: go }, 3: { ref: el } }`. A handler position keeps its LAST named
- * attribute only — the template path's duplicate strip, applied here to the
- * claims (a later attribute wins whatever sits between, so the earlier one
- * is never read on either side); refs merge within a segment as `claimMap`
- * merges them, and across segments at the runtime.
- */
-function claimSegments(
-  claims: [number, string, babelTypes.Expression][]
-): babelTypes.ObjectExpression {
-  const lastHandler = new Map<string, number>();
-  claims.forEach(([, pos], i) => {
-    if (pos !== "ref") lastHandler.set(pos, i);
-  });
-  const segments = new Map<number, [string, babelTypes.Expression][]>();
-  claims.forEach(([index, pos, expr], i) => {
-    if (pos !== "ref" && lastHandler.get(pos) !== i) return;
-    let list = segments.get(index);
-    if (!list) segments.set(index, (list = []));
-    list.push([pos, expr]);
-  });
-  return t.objectExpression(
-    [...segments].map(([index, list]) => t.objectProperty(t.numericLiteral(index), claimMap(list)))
-  );
-}
-
-/**
- * The compiled claim map of an element's handler positions, `{ click: expr,
- * ref: [a, b] }`: duplicate event keys were last-wins-stripped by the
- * template path's duplicate strip (or `claimSegments`); `ref` is exempt from
- * that pass (client semantics fire every ref), so multiple refs merge into
- * an array value.
- */
-function claimMap(claims: [string, babelTypes.Expression][]): babelTypes.ObjectExpression {
-  const byPos = new Map<string, babelTypes.Expression[]>();
-  for (const [pos, expr] of claims) {
-    let list = byPos.get(pos);
-    if (!list) byPos.set(pos, (list = []));
-    list.push(expr);
+/** Does evaluating `node` call anything? A function's body does not run. */
+function callsOutsideFunctions(node: babelTypes.Node): boolean {
+  if (
+    t.isCallExpression(node) ||
+    t.isOptionalCallExpression(node) ||
+    t.isNewExpression(node) ||
+    t.isTaggedTemplateExpression(node) ||
+    isImportExpression(node)
+  )
+    return true;
+  if (t.isFunction(node)) return false;
+  for (const key of t.VISITOR_KEYS[node.type] ?? []) {
+    const child = (node as any)[key];
+    if (Array.isArray(child)) {
+      for (const c of child) if (c && callsOutsideFunctions(c)) return true;
+    } else if (child && typeof child.type === "string" && callsOutsideFunctions(child)) return true;
   }
-  return t.objectExpression(
-    [...byPos].map(([pos, exprs]) =>
-      t.objectProperty(
-        t.stringLiteral(pos),
-        exprs.length === 1 ? exprs[0] : t.arrayExpression(exprs)
-      )
-    )
-  );
+  return false;
 }
 
 /**
@@ -1461,7 +1418,7 @@ function tailAttribute(
       text = trimWhitespace(text);
       if (key === "style") text = text.replace(/; /g, ";").replace(/: /g, ":");
     }
-    return text === "" ? ` ${key}` : ` ${key}="${escapeHTML(text, true)}"`;
+    return text === "" ? ` ${key}` : asciiAttributeMarkup(` ${key}="${escapeHTML(text, true)}"`);
   }
   if (t.isJSXEmptyExpression(literal) || t.isJSXElement(literal) || t.isJSXFragment(literal))
     return undefined;

@@ -150,6 +150,12 @@ export type PrepareRequestHook = (
   context: PrepareRequestContext
 ) => RequestInit | Promise<RequestInit>;
 
+/** How the transport sends a request: `fetch`'s shape, as the runtime calls it. */
+export type ServerFunctionsSend = (
+  address: string,
+  init: RequestInit
+) => Response | Promise<Response>;
+
 /** Options for `configureServerFunctionsClient`. */
 export interface ServerFunctionsClientConfig {
   /**
@@ -177,14 +183,17 @@ export interface ServerFunctionsClientConfig {
   /**
    * Codec options (extra plugins etc.) for encoding arguments and decoding
    * results — must match the server's. Stored in the shared layer, so
-   * `decodeResponse` sees them too.
+   * `decodeResponse` sees them too. Arguments never carry `Response` or
+   * `Request` values, whatever plugins are configured: the server refuses
+   * them, and the rich-args encoder rejects the call before sending.
    */
   codec?: JSONCodecOptions;
   /**
    * Sends every server-function request — retries, telemetry, a test
-   * double, or an app's own route. Always called as `(address, init)`, the
+   * double, or an app's own route. Called as `(address, init)`, the
    * address relative to the document as the global one receives it, so
-   * `parseServerFunctionActionUrl` reads the id back out for telemetry. `null`
+   * `parseServerFunctionActionUrl` reads the id back out for telemetry (a
+   * trailing third argument is the transport's own; ignore it). `null`
    * restores the global.
    *
    * ```ts
@@ -208,7 +217,7 @@ export interface ServerFunctionsClientConfig {
    * The wrapper replaces delivery for the requests the runtime chooses to
    * send; the call-to-request mapping itself is not contractual.
    */
-  fetch?: ((address: string, init: RequestInit) => Response | Promise<Response>) | null;
+  fetch?: ServerFunctionsSend | null;
   /**
    * Runs before every server-function fetch. Return (or mutate and return)
    * the RequestInit the transport will use; `context.meta` is the
@@ -225,6 +234,10 @@ export interface ServerFunctionsClientConfig {
    *   }
    * });
    * ```
+   *
+   * Return synchronously when you can: hydration adopts a server-rendered
+   * read only if its request is sent in the same tick, so an async hook
+   * makes every hydrated read fetch again from the browser.
    */
   prepareRequest?: PrepareRequestHook;
   /**
@@ -244,7 +257,10 @@ export interface ServerFunctionsClientConfig {
      * declared shape and per-call options as dispatched (a `GET`-declared
      * read stays a GET; a caller-supplied `signal` still owns the wire) —
      * for a handler re-asking on its own account (a frames boundary's
-     * `reset`, frames-rulings 3.3).
+     * `reset`, frames-rulings 3.3). Observe tier only: `ctx.startedAt` is
+     * when the request was sent (`performance.now()`), so a handler can
+     * stamp what it hands out with the request's start
+     * (`OBSERVE.attribution.markFlight`).
      */
     handle(
       response: Response,
@@ -254,6 +270,7 @@ export interface ServerFunctionsClientConfig {
         args: unknown[];
         context: unknown;
         retry(): Promise<unknown>;
+        startedAt?: number;
       }
     ): unknown;
     /**
@@ -290,9 +307,11 @@ export interface ServerFunctionsClientConfig {
    * Encoder for argument lists JSON can't carry faithfully. JSON-safe args
    * always go as plain JSON (no codec in the bundle); anything else throws
    * unless this is set. Installed by `enableRichArguments()` from the
-   * rich-args entry — set directly only for custom wire encodings.
+   * rich-args entry — set directly only for custom wire encodings. A
+   * `FormData` answer is sent as an upload: the codec output in its `args`
+   * field and each file in a `file<index>` part.
    */
-  serializeArgs?(args: unknown[]): string | Promise<string>;
+  serializeArgs?(args: unknown[]): string | FormData | Promise<string | FormData>;
 }
 
 /** Wire-state transitions a live call's iterable can report. */
@@ -350,7 +369,7 @@ const config = {
  * <link rel="preload" as="fetch" crossorigin href={serverFunctionUrl(getUser, id)} />
  * ```
  *
- * A `live(GET(fn))` reference's call connects at the live address, so that
+ * A `live(fn)` reference's call connects at the live address, so that
  * is the url returned for one (`<endpoint>/live/<id>[?args=...]`): a
  * standing event stream of the answer — fetch it by hand (`curl -N`) to
  * watch it; do not preload or prefetch it, which would open a stream
@@ -417,7 +436,7 @@ function serializeArguments(args) {
       "Server function arguments are sent as JSON by default and these " +
         "arguments are not JSON-serializable. Call enableRichArguments() " +
         '(from "@solidjs/web/server-functions/rich-args") once at startup ' +
-        "to send Dates, Maps, Sets, typed arrays, etc. through the codec — " +
+        "to send Dates, Maps, Sets, typed arrays, files, etc. through the codec — " +
         "or pass a single Blob/FormData/File argument, which has a native " +
         "HTTP encoding."
     );
@@ -480,12 +499,13 @@ export function configureServerFunctionsClient({
 // `decodeResponse` and the codec behind them into every such bundle. Hung
 // off the reference constructors, the whole transport (seroval included)
 // tree-shakes away unless a reference actually exists — and when one does,
-// the seam is filled before any integration code can hold it.
-let rpcProvided = false;
+// the seam is filled before any integration code can hold it. `live` reads
+// this module's own copy (the global slot may hold another half's surface
+// where both entries load in one process).
+let rpc;
 function provideRPC() {
-  if (rpcProvided) return;
-  rpcProvided = true;
-  provideServerFunctionRPC({ GET, decodeResponse });
+  if (rpc) return;
+  provideServerFunctionRPC((rpc = { GET, decodeResponse }));
 }
 
 // A reconstructed callable's base is a rendered PLAIN-HTTP address
@@ -504,7 +524,6 @@ function siblingAddressFor(base, kind) {
   return `${path.slice(0, slash + 1)}${kind}/${path.slice(slash + 1)}${rest}`;
 }
 const dataAddressFor = base => siblingAddressFor(base, "data");
-const liveAddressFor = base => siblingAddressFor(base, "live");
 
 function serverFunctionFailure(response, value) {
   // The labelled unknown-id 404 (#3110): the deployment that answered does
@@ -608,7 +627,9 @@ async function createRequest(base, id, options, meta) {
   // RequestInit (transport headers included), so session policy can adjust
   // anything the transport is about to send.
   if (config.prepareRequest) {
-    const prepared = await config.prepareRequest(init, { id, meta });
+    let prepared = config.prepareRequest(init, { id, meta });
+    // A sync hook must send in this tick: hydration's fetch mock is only in place synchronously.
+    if (prepared && typeof prepared.then === "function") prepared = await prepared;
     // The hook's return is validated, not adopted wholesale (#3174): the
     // natural mistake — returning a fresh `{ headers }` instead of
     // spreading — used to silently drop the argument payload, the abort
@@ -644,8 +665,12 @@ async function createRequest(base, id, options, meta) {
   // The send, as observed: the `"request"` record leaves from here — the
   // final address and init, immediately before `fetch` receives them.
   if (IS_OBSERVE && observation) observation.request(base, init);
+  // A reference may declare its own send (`withMeta(fn, { fetch })`): it
+  // receives the app's as `next`, so the app's transport policy still
+  // applies to whatever it passes on. (The app's send ignores the extra
+  // argument, as `fetch` does.)
   const send = config.fetch || fetch;
-  return send(base, init);
+  return (meta.fetch || send)(base, init, send);
 }
 
 async function initializeResponse(base, id, options, args, meta) {
@@ -737,6 +762,10 @@ async function initializeResponse(base, id, options, args, meta) {
     }
   }
   // Everything else needs the codec, which is opt-in (enableRichArguments).
+  // The encoder answers `FormData` when the arguments hold files (see
+  // uploads.js). No content type is set here: fetch gives a string body
+  // `text/plain` and a form its multipart boundary, which is how the handler
+  // tells the two apart.
   return createRequest(
     base,
     id,
@@ -745,7 +774,6 @@ async function initializeResponse(base, id, options, args, meta) {
       body: await serializeArguments(args),
       headers: {
         ...options.headers,
-        "Content-Type": "text/plain",
         [BODY_FORMAT_HEADER]: BodyFormat.Serialized
       }
     },
@@ -809,6 +837,8 @@ async function dispatchServerFunction(base, id, options, args, meta, callArgs = 
   // See CALL_OBSERVATION: the observation rides to `createRequest`.
   if (IS_OBSERVE && observation) options = { ...options, [CALL_OBSERVATION]: observation };
 
+  // Observe tier: when the request went out, for the handler's flight stamps.
+  const startedAt = IS_OBSERVE && handler ? performance.now() : undefined;
   const response = await initializeResponse(base, id, options, args, meta);
   if (IS_OBSERVE && observation) observation.response(response);
 
@@ -825,6 +855,7 @@ async function dispatchServerFunction(base, id, options, args, meta, callArgs = 
       context,
       retry: () => fetchServerFunction(base, id, sent, args, meta, callArgs)
     };
+    if (IS_OBSERVE) ctx.startedAt = startedAt;
     if (options[LIVE_WIRE]) ctx[LIVE_WIRE] = options[LIVE_WIRE];
     const handled = handler.handle(response, ctx);
     if (handled !== undefined) return handled;
@@ -1239,6 +1270,18 @@ export interface LiveServerFunction<A extends readonly any[] = any[], R = any> {
 }
 
 /**
+ * Declares a live server function whose answer is the same for every
+ * viewer: on the client exactly `live(fn)` — the sharing is the server's.
+ */
+export function broadcast<A extends readonly any[], R>(
+  fn: (...args: A) => R
+): LiveServerFunction<A, Awaited<R>>;
+
+export function broadcast(fn) {
+  return live(fn);
+}
+
+/**
  * Declares a value-shaped live source: a server function returning an async
  * iterable whose yields are successive VALUES of one logical query, with the
  * contract that the source re-yields current state on every invocation.
@@ -1248,7 +1291,8 @@ export interface LiveServerFunction<A extends readonly any[] = any[], R = any> {
  * first-connect failures reject like a normal call, and `break` aborts the
  * in-flight request. Live calls are reads and never opt into single-flight
  * enveloping. Wire state, if wanted, rides the returned iterable's
- * `onstatus` hook. Compose with `GET` inside-out: `live(GET(fn))`.
+ * `onstatus` hook. Implies `GET` (a live source is a read); an explicit
+ * `live(GET(fn))` is equivalent.
  */
 export function live<A extends readonly any[], R>(
   fn: (...args: A) => R
@@ -1282,9 +1326,10 @@ export function live<A extends readonly any[], R>(
  * a mutation's effects arrive through the open stream) and hence no
  * single-flight participation (live calls are reads and never request
  * enveloping). All behavior lives inside this declaration — apps that
- * never import `live` carry none of it. Compose with `GET` inside-out
- * (`live(GET(fn))`): live must be the outermost declaration, since its
- * behavior wraps the call.
+ * never import `live` carry none of it. Implies `GET`: a live source is a
+ * read by contract, so the reference connects over the GET transport (and
+ * takes on its safe-read obligations); `live(GET(fn))` is equivalent. Live
+ * stays the outermost declaration, since its behavior wraps the call.
  *
  * Wire state, if a UI wants it, rides an optional `onstatus` hook on the
  * returned iterable — a side channel for the facts the retry loop
@@ -1340,6 +1385,11 @@ export function live(fn) {
   if (!isServerFunction(fn)) {
     throw new Error("live expects a server function reference");
   }
+  // live implies GET: a live source is a read by contract. An explicit
+  // GET(fn) inside passes through untouched. Reached through the RPC seam
+  // (filled by any real reference, which `fn` is) so importing `live` alone —
+  // a router's liveQuery over a plain producer — carries no transport.
+  if (getServerFunctionMetadata(fn)?.method !== "GET") fn = rpc.GET(fn);
   const id = fn.id;
   const metadata = { ...getServerFunctionMetadata(fn), live: true };
   const makeIterable = (args, invokeOptions) => {
@@ -1498,27 +1548,12 @@ export function live(fn) {
             wire.headers = from ? from.headers : undefined;
             if (from && from.position !== undefined) wire.position = from.position;
           }
-          // A GET-composed reference is already a flight-free read with its
-          // own query-string encoding — delegate through its invocation
-          // channel so the wire options (the combined signal and the wire
-          // slot, which moves it to the live address) reach its fetch.
-          // Otherwise call the transport directly, at the live address, with
-          // the POST marked a read: live responses are streams, which have
-          // no single-flight envelope story (and flight collection is
-          // mutation policy).
-          if (metadata.method === "GET") return fn[SERVER_FUNCTION_INVOKE](args, wireOptions);
-          if (handler && handler.intercept && !wire.adopted) {
-            const hit = handler.intercept({ id, meta: metadata, args });
-            if (hit !== undefined) return hit;
-          }
-          return fetchServerFunction(
-            liveAddressFor(fn.url),
-            id,
-            { ...wireOptions, read: true },
-            args,
-            metadata,
-            args
-          );
+          // The GET-declared reference (live implies it) is already a
+          // flight-free read with its own query-string encoding — delegate
+          // through its invocation channel so the wire options (the combined
+          // signal and the wire slot, which moves it to the live address)
+          // reach its fetch. Its channel also owns the local-answer seam.
+          return fn[SERVER_FUNCTION_INVOKE](args, wireOptions);
         };
         const pull = async () => {
           if (resume !== undefined) {

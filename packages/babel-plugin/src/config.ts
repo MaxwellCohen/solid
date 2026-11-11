@@ -15,6 +15,15 @@ export interface SourceNamesConfig {
   components?: boolean;
   /** Binding effect labels: the element and attribute (or hole) each compiled effect writes. */
   bindings?: boolean;
+  /**
+   * Source locations beside the labels: a `file:line:col` string (the module
+   * path relative to `root`, 1-based line and column) as a fourth
+   * `createComponent` argument and as `loc` after `name` in a binding's
+   * options, so a diagnostic can point at the JSX that created the node. Only
+   * emitted where the corresponding label is, and only when Babel knows the
+   * file's `filename`.
+   */
+  locations?: boolean;
 }
 
 export interface PluginConfig {
@@ -36,7 +45,12 @@ export interface PluginConfig {
    * binding effect named by what it writes — `span.textContent`,
    * `div.class:active`, `div.style:color`, a hole `div.children`, a spread
    * `div.spread` — as an options argument on `effect`/`insert`/`spread`;
-   * DOM output only. The production runtimes ignore the names. Defaults to
+   * DOM output only. `locations`: a `file:line:col` beside each label the
+   * other two kinds emit (`createComponent(Home, props, "Home",
+   * "src/App.tsx:12:5")`, `{ name: "div.class", loc: "src/App.tsx:14:7" }`)
+   * — the path relative to `root`, the line and column 1-based — so a
+   * diagnostic can point at the JSX; nothing when Babel has no `filename`
+   * for the module. The production runtimes ignore the names. Defaults to
    * `dev`: unset, every kind is on in dev and off otherwise; `true`/`false`
    * sets every kind; an object picks, and each kind it leaves unspecified
    * follows `dev`. Primitive names (`createSignal(0, { name: "count" })`)
@@ -44,11 +58,21 @@ export interface PluginConfig {
    * `transformSourceNames` pass, which the build tool runs on every module
    * independently of the JSX compiler. */
   sourceNames?: boolean | SourceNamesConfig;
+  /** Project root the `sourceNames.locations` path is made relative to;
+   * defaults to the working directory (Babel's `cwd`). A relative `root` is
+   * resolved against the working directory. */
+  root?: string;
   delegateEvents: boolean;
   delegatedEvents: string[];
   builtIns: string[];
   requireImportSource: false | string;
   wrapConditionals: boolean;
+  /** Lower a `<Show>` that needs no component to the ternary it renders
+   * (`shared/lower-show.ts`): no `keyed`, no spread, only `when`/`fallback`,
+   * JSX children or a one-param callback whose `when` is a plain read.
+   * Defaults to `!dev`: dev builds keep the component and its stale-read
+   * error. Server and client must agree, as with every hydratable option. */
+  lowerShow?: boolean;
   omitNestedClosingTags: boolean;
   omitLastClosingTag: boolean;
   omitQuotes: boolean;
@@ -59,7 +83,6 @@ export interface PluginConfig {
   memoWrapper: string | false;
   validate: boolean;
   inlineStyles: boolean;
-  serverComponents: boolean;
   /** SSR only: emit each component's props literal with getters as a
    * module-level constructor with shared getters (one hidden class per call
    * site, no closure per getter per instance) instead of an object literal,
@@ -104,7 +127,6 @@ const config: PluginConfig = {
   memoWrapper: "memo",
   validate: true,
   inlineStyles: true,
-  serverComponents: false,
   hoistProps: true
 };
 
@@ -115,8 +137,12 @@ const config: PluginConfig = {
  */
 export function sourceNames(config: PluginConfig): Required<SourceNamesConfig> {
   const value = config.sourceNames ?? config.dev;
-  if (typeof value === "boolean") return { components: value, bindings: value };
-  return { components: value.components ?? config.dev, bindings: value.bindings ?? config.dev };
+  if (typeof value === "boolean") return { components: value, bindings: value, locations: value };
+  return {
+    components: value.components ?? config.dev,
+    bindings: value.bindings ?? config.dev,
+    locations: value.locations ?? config.dev
+  };
 }
 
 /**

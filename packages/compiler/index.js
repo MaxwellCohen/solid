@@ -10,7 +10,7 @@ function transform(code, options) {
     throw new TypeError("@solidjs/compiler transform() expects source code as a string");
   }
 
-  const nativeOptions = validateOptions(code, options);
+  const nativeOptions = hostRoot(validateOptions(code, options));
   const result = native.transform(code, nativeOptions);
   const output = {
     code: result.code,
@@ -71,7 +71,7 @@ function transformDirectives(code, options) {
     throw new TypeError("@solidjs/compiler transformDirectives() expects source code as a string");
   }
 
-  const nativeOptions = validateDirectivesOptions(options);
+  const nativeOptions = hostRoot(validateDirectivesOptions(options));
   const result = native.transformDirectives(code, nativeOptions);
   return {
     code: result.code,
@@ -124,7 +124,7 @@ function transformSourceNames(code, options) {
     throw new TypeError("@solidjs/compiler transformSourceNames() expects source code as a string");
   }
 
-  const nativeOptions = validateSourceNamesOptions(options);
+  const nativeOptions = hostRoot(validateSourceNamesOptions(options));
   const result = native.transformSourceNames(code, nativeOptions);
   return {
     code: result.code,
@@ -136,7 +136,7 @@ function transformSourceNamesAsync(code, options) {
   return Promise.resolve().then(() => transformSourceNames(code, options));
 }
 
-const sourceNamesOptionKeys = new Set(["filename", "sourceMap"]);
+const sourceNamesOptionKeys = new Set(["filename", "locations", "root", "sourceMap"]);
 
 function validateSourceNamesOptions(options) {
   if (options == null) return options;
@@ -149,11 +149,11 @@ function validateSourceNamesOptions(options) {
     if (!sourceNamesOptionKeys.has(key)) {
       throw new Error(`@solidjs/compiler received unknown option \`${key}\``);
     }
-    if (key === "filename" && typeof value !== "string") {
-      throw new TypeError("@solidjs/compiler `filename` option must be a string");
+    if ((key === "filename" || key === "root") && typeof value !== "string") {
+      throw new TypeError(`@solidjs/compiler \`${key}\` option must be a string`);
     }
-    if (key === "sourceMap" && typeof value !== "boolean") {
-      throw new TypeError("@solidjs/compiler `sourceMap` option must be boolean");
+    if ((key === "sourceMap" || key === "locations") && typeof value !== "boolean") {
+      throw new TypeError(`@solidjs/compiler \`${key}\` option must be boolean`);
     }
     nativeOptions[key] = value;
   }
@@ -297,6 +297,7 @@ function validateImportDefinition(key, value) {
 
 const nativeOptionKeys = new Set([
   "filename",
+  "root",
   "moduleName",
   "generate",
   "hydratable",
@@ -311,13 +312,13 @@ const nativeOptionKeys = new Set([
   "inlineStyles",
   "effectWrapper",
   "wrapConditionals",
+  "lowerShow",
   "memoWrapper",
   "requireImportSource",
   "validate",
   "staticMarker",
   "omitNestedClosingTags",
   "omitLastClosingTag",
-  "serverComponents",
   "hoistProps",
   "builtIns",
   "renderers"
@@ -356,6 +357,13 @@ function validateOptions(code, options) {
       nativeOptions.wrapConditionals = value;
       continue;
     }
+    if (key === "lowerShow") {
+      if (typeof value !== "boolean") {
+        throw new TypeError("@solidjs/compiler `lowerShow` option must be boolean");
+      }
+      nativeOptions.lowerShow = value;
+      continue;
+    }
     if (key === "validate") {
       if (typeof value !== "boolean") {
         throw new TypeError("@solidjs/compiler `validate` option must be boolean");
@@ -368,6 +376,16 @@ function validateOptions(code, options) {
       nativeOptions.sourceNames = value;
       continue;
     }
+    // Removed with binding slots (2026-10-16). Still accepted, and ignored,
+    // because @solidjs/vite-plugin passes it for server-component builds.
+    if (key === "serverComponents") continue;
+    if (key === "root") {
+      if (typeof value !== "string") {
+        throw new TypeError("@solidjs/compiler `root` option must be a string");
+      }
+      nativeOptions.root = value;
+      continue;
+    }
     if (nativeOptionKeys.has(key)) {
       if (key === "renderers") validateRenderers(value);
       nativeOptions[key] = value;
@@ -378,7 +396,7 @@ function validateOptions(code, options) {
   return nativeOptions;
 }
 
-const sourceNameKinds = new Set(["components", "bindings"]);
+const sourceNameKinds = new Set(["components", "bindings", "locations"]);
 
 function validateSourceNames(value) {
   if (typeof value === "boolean") return;
@@ -433,6 +451,23 @@ function tryPackage(packageName) {
     if (isMissingPackage(error, packageName)) return { missing: true };
     return { error };
   }
+}
+
+// The binding makes `filename` relative to `root` (`loc` paths, directive
+// hashes), resolving both against its own working directory. A WASI binding
+// cannot see the host's (it starts at `/`), so hand it a `root` that needs
+// none: absolute beside an absolute filename (the working directory when
+// unset), relative beside a relative one. The result is unchanged on a native
+// binding.
+function hostRoot(nativeOptions) {
+  if (nativeOptions == null || typeof nativeOptions.filename !== "string") return nativeOptions;
+  const { filename, root } = nativeOptions;
+  if (path.isAbsolute(filename)) {
+    nativeOptions.root = path.resolve(root ?? ".");
+  } else if (root !== undefined && path.isAbsolute(root)) {
+    nativeOptions.root = path.relative(process.cwd(), root) || ".";
+  }
+  return nativeOptions;
 }
 
 function requireBinding() {

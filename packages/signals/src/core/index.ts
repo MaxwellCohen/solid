@@ -9,13 +9,15 @@ export {
   signal,
   read,
   setSignal,
+  setWriteHook,
   setMemo,
   markRefresh,
   staleValues,
   setSnapshotCapture,
   markSnapshotScope,
   releaseSnapshotScope,
-  clearSnapshots
+  clearSnapshots,
+  verdict
 } from "./core.js";
 export {
   enableExternalSource,
@@ -35,6 +37,7 @@ export {
   cleanup,
   peekNextChildId
 } from "./owner.js";
+export { setSignalIdentities, signalName, signalHook, setReadWatch } from "./identities.js";
 export {
   createContext,
   getContext,
@@ -54,7 +57,7 @@ export {
   type QueueCallback
 } from "./scheduler.js";
 export type { InteractionRef, NavigationRef } from "./attribution-hooks.js";
-export { ROOT_ERROR_HOOK } from "./scheduler.js";
+export { ROOT_ERROR_HOOK, clock } from "./scheduler.js";
 export {
   configureClientErrors,
   type ClientErrorContext,
@@ -65,6 +68,8 @@ export {
   DEV,
   OBSERVE,
   setConsoleFooter,
+  registerDevStoreSlotWriter,
+  setDevSignal,
   type AttributionSlot,
   type Dev,
   type Observe,

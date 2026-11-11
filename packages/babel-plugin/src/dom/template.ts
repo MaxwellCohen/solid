@@ -4,6 +4,7 @@ import {
   getConfig,
   getNumberedId,
   getRendererConfig,
+  getSetupStatement,
   isLockedDOMProperty,
   isStatementVariableInitializer,
   isStatefulDOMProperty,
@@ -12,6 +13,7 @@ import {
 } from "../shared/utils";
 import { setAttr } from "./element";
 import { namesBindings } from "../config";
+import { bindingOptions } from "../shared/location";
 import type { NodePath } from "@babel/traverse";
 import type { DynamicBinding, ProgramScopeData, TemplateRecord, TransformResult } from "../types";
 
@@ -41,13 +43,18 @@ export function createTemplate(
     }
     registerTemplate(path, result);
     const decl = result.decl!;
+    const dynamicsStmt = wrapDynamics(path, result.dynamics, result.claims, ownerId);
+    pruneUnusedWalks(decl, [
+      ...result.exprs,
+      ...(dynamicsStmt ? [dynamicsStmt] : []),
+      ...(result.postExprs || [])
+    ]);
     if (
-      !(result.exprs.length || result.dynamics.length || result.postExprs?.length) &&
+      !(result.exprs.length || dynamicsStmt || result.postExprs?.length) &&
       decl.declarations.length === 1
     ) {
       return decl.declarations[0].init as t.Expression;
     } else {
-      const dynamicsStmt = wrapDynamics(path, result.dynamics, result.claims, ownerId);
       const stmts = [
         decl,
         ...result.exprs,
@@ -67,7 +74,7 @@ export function createTemplate(
       const isVarInit = isStatementVariableInitializer(path);
 
       if (isReturnArg || isVarInit) {
-        path.getStatementParent()?.insertBefore(stmts as t.Statement[]);
+        getSetupStatement(path)?.insertBefore(stmts as t.Statement[]);
         return result.id;
       }
 
@@ -92,6 +99,43 @@ export function createTemplate(
     ]);
   }
   return result.exprs[0] as t.Expression;
+}
+
+/** Drops `_el$N = _el$M.firstChild` / `.nextSibling` walks whose node is never
+ * read. Positional ids are handed out before it is known whether a child's
+ * insert needs a marker, so a text node ahead of an appended expression keeps
+ * a walk nothing reads. A minifier keeps the property read (it could be a
+ * getter), so it would ship as `_el$M.firstChild;`.
+ *
+ * Runs from the last declarator back, so a walk that only feeds a dropped walk
+ * is dropped too. Other declarators always stay. */
+function pruneUnusedWalks(decl: t.VariableDeclaration, after: t.Node[]) {
+  const read = new Set<string>();
+  const collect = (node: t.Node) =>
+    t.traverseFast(node, n => {
+      if (t.isIdentifier(n)) read.add(n.name);
+    });
+
+  // Names read by the statements that run after the walks
+  for (const node of after) collect(node);
+
+  // Keep a walk only when something kept after it reads its node
+  const kept: t.VariableDeclarator[] = [];
+  for (let i = decl.declarations.length - 1; i >= 0; i--) {
+    const declarator = decl.declarations[i];
+    const init = declarator.init;
+    const isWalk =
+      t.isIdentifier(declarator.id) &&
+      t.isMemberExpression(init) &&
+      !init.computed &&
+      t.isIdentifier(init.object) &&
+      t.isIdentifier(init.property) &&
+      (init.property.name === "firstChild" || init.property.name === "nextSibling");
+    if (isWalk && !read.has((declarator.id as t.Identifier).name)) continue;
+    collect(declarator);
+    kept.push(declarator);
+  }
+  decl.declarations = kept.reverse();
 }
 
 export function appendTemplates(path: NodePath<t.Program>, templates: TemplateRecord[]) {
@@ -218,21 +262,19 @@ function wrapDynamics(
   // binding's `<tag>.<attribute>` as written (undoing the `prop:` the locked
   // DOM property pre-pass added to `value`, `checked`, …), the merged effect
   // listing all of its bindings — as a trailing `{ name }` options argument.
+  // `sourceNames.locations` adds `loc` after it: the first binding's
+  // attribute start (a merged effect points at the first attribute it lists).
   const label = namesBindings(config)
     ? [
-        t.objectExpression([
-          t.objectProperty(
-            t.identifier("name"),
-            t.stringLiteral(
-              dynamics
-                .map(
-                  d =>
-                    `${d.tagName}.${isLockedDOMProperty(d.tagName, d.key) ? d.key.replace(/^prop:/, "") : d.key}`
-                )
-                .join(", ")
+        bindingOptions(
+          dynamics
+            .map(
+              d =>
+                `${d.tagName}.${isLockedDOMProperty(d.tagName, d.key) ? d.key.replace(/^prop:/, "") : d.key}`
             )
-          )
-        ])
+            .join(", "),
+          dynamics.find(d => d.loc !== undefined)?.loc
+        )
       ]
     : [];
 
@@ -258,6 +300,7 @@ function wrapDynamics(
             t.expressionStatement(
               setAttr(path, dynamics[0].elem, dynamics[0].key, newValue, {
                 tagName: dynamics[0].tagName,
+                checkableInput: dynamics[0].checkableInput,
                 dynamic: true,
                 prevId: prevValue,
                 styleProperty: dynamics[0].styleProperty,
@@ -278,7 +321,9 @@ function wrapDynamics(
   const statements: t.ExpressionStatement[] = [];
   const properties: t.Identifier[] = [];
 
-  dynamics.forEach(({ elem, key, value, tagName, styleProperty, classProperty }, index) => {
+  dynamics.forEach((binding, index) => {
+    const { elem, key, tagName, styleProperty, classProperty, checkableInput } = binding;
+    let value = binding.value;
     const propIdent = t.identifier(getNumberedId(index));
     const propMember = t.memberExpression(prevId, propIdent);
     const optionalPropMember = t.optionalMemberExpression(prevId, propIdent, false, true);
@@ -296,7 +341,8 @@ function wrapDynamics(
           setAttr(path, elem, key, propIdent, {
             tagName,
             dynamic: true,
-            prevId: optionalPropMember
+            prevId: optionalPropMember,
+            checkableInput
           })
         )
       );
@@ -316,7 +362,8 @@ function wrapDynamics(
               tagName,
               dynamic: true,
               styleProperty,
-              classProperty
+              classProperty,
+              checkableInput
             })
           )
         )

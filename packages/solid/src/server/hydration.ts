@@ -14,11 +14,24 @@ import {
   throwerOf,
   ownerId,
   onCleanup,
-  inServerComponentScope
+  inServerComponentScope,
+  edgeHooks,
+  MAX_RESUME_PASSES,
+  ESCALATE,
+  fragmentContainer,
+  setFragmentContainer,
+  type FragmentContainer
 } from "./signals.js";
 import { OBSERVE } from "@solidjs/signals";
 import { sharedConfig, NoHydrateContext, callerRenderContext } from "./shared.js";
-import { IS_DEV, IS_OBSERVE, devCheck, emitFinding, errorText } from "./diagnostics.js";
+import {
+  IS_DEV,
+  IS_OBSERVE,
+  devCheck,
+  emitFinding,
+  errorText,
+  flightOrigin
+} from "./diagnostics.js";
 import type { BoundaryEvent, BoundaryLive } from "./observe.js";
 import type { SSRTemplateObject, HydrationContext } from "./shared.js";
 import type { Accessor } from "./signals.js";
@@ -82,6 +95,35 @@ export function createLoadingBoundary<T, U>(
 // render's `registerFragment`, which every context clone of a render shares.
 const fragmentOwners = /* @__PURE__ */ new WeakMap<Function, Record<string, Function>>();
 
+/**
+ * Dev: one boundary's waits as the waterfall check judges them, by the
+ * client's origin rule. A nested route meets its levels a render pass at a
+ * time, but the router starts every matched level's `lazy()` import and
+ * preload together; a wait whose work had all started before the previous
+ * wait landed ran in parallel and is not a link in the chain (#4105). Starts
+ * come from `markFlight` stamps; an unstamped flight counts as starting when
+ * the boundary meets it.
+ */
+function trackWaits() {
+  let landedAt = -Infinity;
+  let early = false;
+  const waits = {
+    /** Waits left out of the chain: everything they waited on started earlier. */
+    parallel: 0,
+    start(waited: readonly object[]) {
+      early = waited.every(p => {
+        const origin = flightOrigin(p);
+        return origin !== undefined && origin < landedAt;
+      });
+    },
+    landed() {
+      if (early) waits.parallel++;
+      landedAt = performance.now();
+    }
+  };
+  return waits;
+}
+
 function ssrLoadingBoundary(
   currentCtx: HydrationContext,
   fn: () => any,
@@ -117,12 +159,30 @@ function ssrLoadingBoundary(
   (o as any).id = contentId;
 
   let done: ReturnType<HydrationContext["registerFragment"]> | undefined;
+  // This boundary's fragment as the boundaries rendered into it see it
+  // (`FragmentContainer`): open from registration until it settles, and
+  // the descendant `<Errored>` fallbacks to draw in place of their markup
+  // when it does (#4316). `discarded` once it settled with a failure: a
+  // later failure from inside it has nothing left to fail.
+  const container: FragmentContainer = {
+    open: false,
+    region: (from, to, err) => void regions.push({ from, to, err })
+  };
+  let regions: {
+    from: string;
+    to: string | undefined | (() => Promise<string | undefined>);
+    err: any;
+  }[] = [];
+  let discarded = false;
   let handledRenderError: any;
   let retryPromise: Promise<any> | undefined;
 
   // Render passes over the content: discovery, plus one per wait. Doubles as
   // the convergence budget's counter below.
   let passes = 0;
+  // Dev: the waterfall check's start-time bookkeeping (see `trackWaits`).
+  // The record still counts every pass.
+  const waits = IS_DEV ? trackWaits() : undefined;
 
   // Observe tier: the boundary RECORD (`OBSERVE.records`, type `"boundary"`
   // — see `BoundaryEvent`), for a boundary that waited. One gate for the
@@ -139,7 +199,7 @@ function ssrLoadingBoundary(
   const timed = IS_DEV || observed;
   const discoveredAt = timed ? performance.now() : 0;
   let recorded = false;
-  let streamedOnError = false;
+  let streamedOnError: boolean | Promise<boolean> = false;
   let pendingRecord: (() => void) | undefined;
   const record = (outcome: BoundaryEvent["outcome"], streamed: boolean, error?: unknown) => {
     if (recorded) return;
@@ -197,12 +257,15 @@ function ssrLoadingBoundary(
   // artifact, coded so the console and `expectNoDiagnostics` see them.
   const checkWaited = (outcome: BoundaryEvent["outcome"], durationMs: number) => {
     // Sequential render passes: each pass past the first is a wait that
-    // could only start once the previous answered. Same thresholds as the
+    // could only start once the previous answered, unless everything it
+    // waited on was stamped as started before that (`parallelWaits`, the
+    // client's origin rule). Same thresholds as the
     // client's graph-proved ASYNC_WATERFALL — depth 2 advisory (a dependent
     // fetch is sometimes intrinsic), depth 3+ earns the console — but its
     // own code: the proof here is the boundary's pass structure, not a
     // flight chain, and the repair is read off the boundary record.
-    const flights = passes - 1;
+    const parallelWaits = waits!.parallel;
+    const flights = passes - 1 - parallelWaits;
     if (flights >= 2) {
       const severity = flights > 2 ? "warn" : "info";
       devCheck(
@@ -212,11 +275,17 @@ function ssrLoadingBoundary(
           severity,
           message:
             `[SSR_BOUNDARY_WATERFALL] A <Loading> boundary took ${passes} render passes — ` +
-            `${flights} sequential async waits, ${durationMs.toFixed(0)}ms end to end: each ` +
+            `${flights} sequential async waits` +
+            (parallelWaits
+              ? ` (not counting ${parallelWaits} on work already started: a preload or lazy() import)`
+              : "") +
+            `, ${durationMs.toFixed(0)}ms end to end: each ` +
             `read could start only after the previous one answered. If a later read doesn't ` +
             `need the earlier answer, derive both from the same inputs so they start together; ` +
             `if the dependency is intrinsic, preload the dependent data or join the requests.`,
-          data: { boundary: id, passes, sequentialMs: durationMs }
+          data: parallelWaits
+            ? { boundary: id, passes, parallelWaits, sequentialMs: durationMs }
+            : { boundary: id, passes, sequentialMs: durationMs }
         },
         o
       );
@@ -268,10 +337,10 @@ function ssrLoadingBoundary(
       },
       // Located where it was THROWN (the owner it escaped), the boundary that
       // met it in `data` — the same two facts the server error hook carries.
-      throwerOf(err) ?? o
+      throwerOf(err, ctx._errorScope) ?? o
     );
   };
-  let serializeBuffer: [string, any, boolean?][] = [];
+  let serializeBuffer: [string, any, boolean?, boolean?][] = [];
   // Once this boundary has flushed, it never buffers again (resets only happen
   // during retry discovery, before the first flush). A chained async source can
   // resolve *after* the boundary commits — e.g. `b` depends on `a`, so `b`
@@ -280,9 +349,14 @@ function ssrLoadingBoundary(
   // in a buffer that will never flush again (which would orphan the fragment).
   let flushed = false;
   const bufferedCtx = Object.create(ctx) as typeof ctx;
-  bufferedCtx.serialize = (id: string, value: any, deferStream?: boolean) => {
-    if (flushed) ctx.serialize(id, value, deferStream);
-    else serializeBuffer.push([id, value, deferStream]);
+  bufferedCtx.serialize = (
+    id: string,
+    value: any,
+    deferStream?: boolean,
+    errorRecord?: boolean
+  ) => {
+    if (flushed) ctx.serialize(id, value, deferStream, errorRecord);
+    else serializeBuffer.push([id, value, deferStream, errorRecord]);
   };
   // Asset attribution (`_currentBoundaryId`) is NOT set here. The property is
   // an accessor inherited from the root context over a single shared tracking
@@ -294,7 +368,7 @@ function ssrLoadingBoundary(
   // `runWithBoundaryErrorContext`, which sets and restores it around the run.
 
   function flushSerializeBuffer() {
-    for (const args of serializeBuffer) ctx.serialize(args[0], args[1], args[2]);
+    for (const args of serializeBuffer) ctx.serialize(args[0], args[1], args[2], args[3]);
     serializeBuffer = [];
     flushed = true;
   }
@@ -312,8 +386,12 @@ function ssrLoadingBoundary(
 
   // What the fragment carries for a failure once it is registered (its
   // channel owns the routing — see runLoadingPhase). Outside a server
-  // component: nothing — the blank the client twin renders fresh over, as
-  // always (`hydratedCreateLoadingBoundary`'s rejected arm). Inside one
+  // component (asked with this boundary's id, #4287): the fallback of an
+  // `<Errored>` this boundary is all the content of — drawn where the client
+  // twin draws it, its error serialized at the Errored id so the hydrating
+  // client adopts that markup; otherwise nothing — the blank the client
+  // twin renders fresh over (`hydratedCreateLoadingBoundary`'s rejected
+  // arm). Inside one
   // (frames-rulings 3.3, A0 corollary 4 inward — the position shows what the
   // SERVER rendered for the outcome, never a blank, never a client-invented
   // state; there is no twin): the nearest server `<Errored>`'s fallback for
@@ -325,11 +403,19 @@ function ssrLoadingBoundary(
   // Hydration ids inside the rendered fallback are the component's own
   // hydration-free scope's; its head and asset registrations drop with the
   // error, as the error path drops them today.
-  function errorOutcome(err: any): { value?: string; escaped?: { frame?: string } } | undefined {
-    if (!inServerComponentScope(o as any)) return undefined;
-    const rendered = parentHandler ? parentHandler(err, true) : undefined;
+  // An `<Errored>` fallback still resolving answers with a function (see
+  // `renderOutcome`): the failure waits for it, as a client swap to a
+  // fallback waits for the fallback to be ready (RULES-DERIVED D-18) — the
+  // placeholder stays until the finished fallback replaces it, or, parked
+  // in an enclosing pending fragment, that fragment carries it (#4306).
+  type Outcome = { value?: string; escaped?: { frame?: string } } | undefined;
+  function errorOutcome(err: any, wait?: boolean): Outcome | Promise<Outcome> {
+    const scoped = inServerComponentScope(o as any);
+    const rendered = parentHandler ? parentHandler(err, scoped || id) : undefined;
     if (typeof rendered === "string") return { value: rendered };
-    return { value: plainFallback(), escaped: { frame: ctx.frameId } };
+    if (typeof rendered === "function" && wait)
+      return rendered().then(value => (value === undefined ? undefined : { value }));
+    if (scoped) return { value: plainFallback(), escaped: { frame: ctx.frameId } };
   }
   // Settle the fragment with the failure. The server error hook hears of it
   // first (the `_fr` rejection and a transport sink's error chunk read the
@@ -340,18 +426,38 @@ function ssrLoadingBoundary(
   // Whether the last failure's outcome was rendered by a server <Errored>
   // (its own finding names it; the "client re-renders" one would be wrong).
   let outcomeRendered = false;
-  function failFragment(err: any, report: boolean): boolean {
-    const outcome = errorOutcome(err);
-    outcomeRendered = !!outcome && outcome.value !== undefined && !outcome.escaped;
-    if (report && !outcomeRendered) {
-      reportServerError(
-        err,
-        { kind: "render", handling: "client", boundary: id },
-        o,
-        ctx.errorPolicy
-      );
-    }
-    return done!(outcome && outcome.value, err, outcome && outcome.escaped);
+  // With `wait`, answers a promise where the outcome is still resolving (see
+  // errorOutcome): the fragment settles when it lands.
+  function failFragment(err: any, report: boolean, wait?: boolean): boolean | Promise<boolean> {
+    const settle = (outcome: Outcome) => {
+      discarded = true;
+      outcomeRendered = !!outcome && outcome.value !== undefined && !outcome.escaped;
+      // Parked in an enclosing fragment still pending, with nothing drawn at
+      // this position: the failure is that fragment's content's, as a
+      // failure in its own pass would be (#4316) — the nearest boundary up
+      // meets it there (an `<Errored>` draws its fallback in place of its
+      // markup; else the enclosing fragment fails). Settled first, so this
+      // fragment parks before the enclosing one settles; the boundary that
+      // meets it reports it.
+      if (!outcome && parentHandler && fragmentContainer(parent, true)) {
+        done!(undefined, err);
+        parentHandler(err, ESCALATE);
+        outcomeRendered = true;
+        return true;
+      }
+      if (report && !outcomeRendered) {
+        reportServerError(
+          err,
+          { kind: "render", handling: "client", boundary: id },
+          o,
+          ctx.errorPolicy,
+          ctx._errorScope
+        );
+      }
+      return done!(outcome && outcome.value, err, outcome && outcome.escaped);
+    };
+    const outcome = errorOutcome(err, wait);
+    return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
   }
 
   function runLoadingPhase<T>(render: () => T): T {
@@ -360,9 +466,18 @@ function ssrLoadingBoundary(
       o,
       render,
       (err: any, handler, outcome) => {
+        // A failure from inside this boundary's content that surfaced after
+        // its pass (see `ESCALATE`): still pending, the fragment fails with
+        // it; already failed, there is nothing left to fail; otherwise its
+        // content is out or rendered into the enclosing output — up.
+        if (outcome === ESCALATE) {
+          if (container.open) return failOpen(err);
+          if (discarded) return true;
+          return handler ? handler(err, ESCALATE) : undefined;
+        }
         // The outcome question (see errorOutcome) is a `<Loading>`'s to pass
         // up: it owns no fallback for an error.
-        if (outcome) return handler ? handler(err, true) : undefined;
+        if (outcome !== undefined) return handler ? handler(err, outcome) : undefined;
         handledRenderError = err;
         if (done) {
           // Once the fragment is registered, its channel owns error routing:
@@ -377,8 +492,9 @@ function ssrLoadingBoundary(
           // hydration before the fragment channel can engage. (Inside a
           // server component the nearest server `<Errored>` IS asked — for
           // its rendered outcome, not to route; see errorOutcome.)
-          streamedOnError = failFragment(err, true);
-          if (!outcomeRendered) reportRouted(err, "client");
+          streamedOnError = failFragment(err, true, true);
+          if (!(streamedOnError instanceof Promise) && !outcomeRendered)
+            reportRouted(err, "client");
           throw err;
         }
         // Synchronous discovery (no fragment yet): the enclosing Errored's
@@ -395,6 +511,44 @@ function ssrLoadingBoundary(
     );
   }
 
+  // An escalated failure fails the fragment while it is still pending, as a
+  // failure in its own pass does (the hole path above); the resume loop
+  // stops at its next wake.
+  function failOpen(err: any): true {
+    container.open = false;
+    discarded = true;
+    const settling = failFragment(err, true, true);
+    const settled = (streamed: boolean) => {
+      if (!outcomeRendered) reportRouted(err, "client");
+      record("error", streamed, err);
+    };
+    settling instanceof Promise ? settling.then(settled) : settled(settling);
+    return true;
+  }
+
+  // The settled markup with each descendant `<Errored>` fallback drawn in
+  // place of its markup (`container.region`), waited for until finished.
+  // Outermost first: a region inside one already replaced has gone with it.
+  // A region not found, or a fallback that never finished, fails the
+  // fragment with the region's error instead (thrown to the caller).
+  async function drawRegions(value: string): Promise<string> {
+    for (let i = 0; i < regions.length; i++) {
+      const r = regions[i];
+      if (typeof r.to === "function") r.to = await r.to();
+      if (!container.open) return value;
+    }
+    const drawn: string[] = [];
+    for (let i = regions.length - 1; i >= 0; i--) {
+      const { from, to, err } = regions[i];
+      const at = value.indexOf(from);
+      if (at < 0 && drawn.some(d => d.includes(from))) continue;
+      if (at < 0 || to === undefined) throw err;
+      value = value.slice(0, at) + to + value.slice(at + from.length);
+      drawn.push(from);
+    }
+    return value;
+  }
+
   // Only ever called from the async resume loop below — there is nothing on
   // the stack to catch a throw from here. The initial (synchronous) discovery
   // pass propagates unhandled errors directly out of runLoadingPhase to the
@@ -406,10 +560,16 @@ function ssrLoadingBoundary(
   // flushed — for that pre-shell case, and for a parent handler that itself
   // throws, route through the renderer's containment channel instead: the
   // request fails (onError + wind-down), the process survives.
-  function finalizeError(err: any) {
+  function finalizeError(err: any): void | Promise<void> {
     if (handledRenderError === err) {
       handledRenderError = undefined;
-      record("error", streamedOnError, err);
+      const settling = streamedOnError;
+      if (settling instanceof Promise)
+        return settling.then(streamed => {
+          if (!outcomeRendered) reportRouted(err, "client");
+          record("error", streamed, err);
+        });
+      record("error", settling, err);
       return;
     }
     if (done) {
@@ -433,7 +593,8 @@ function ssrLoadingBoundary(
         err,
         { kind: "render", handling: "failed", boundary: id },
         o,
-        ctx.errorPolicy
+        ctx.errorPolicy,
+        ctx._errorScope
       );
       ctx.failRender ? ctx.failRender(err) : console.error(err);
       return;
@@ -447,7 +608,8 @@ function ssrLoadingBoundary(
           caught,
           { kind: "render", handling: "failed", boundary: id },
           o,
-          ctx.errorPolicy
+          ctx.errorPolicy,
+          ctx._errorScope
         );
         ctx.failRender ? ctx.failRender(caught) : console.error(caught);
       }
@@ -469,10 +631,13 @@ function ssrLoadingBoundary(
     const prevCount = (o as any)._childCount;
     (o as any).id = flattenId;
     (o as any)._childCount = resolveCount;
+    // Dependency edges: the scope's plain-signal count continues too.
+    const prevSig = edgeHooks !== null ? edgeHooks.enter(resolveIn, o, true) : 0;
     try {
       return run();
     } finally {
       resolveCount = (o as any)._childCount;
+      if (edgeHooks !== null) edgeHooks.leave(resolveIn, o, prevSig, 2);
       (o as any).id = contentId;
       (o as any)._childCount = prevCount;
     }
@@ -481,6 +646,7 @@ function ssrLoadingBoundary(
   function runDiscovery(): SSRTemplateObject | undefined {
     disposeOwner(o, false);
     serializeBuffer = [];
+    regions = [];
     retryPromise = undefined;
     resolveCount = 0;
     passes++;
@@ -600,7 +766,10 @@ function ssrLoadingBoundary(
 
   if (ctx.async) {
     const regOpts = revealGroup ? { revealGroup: revealGroup.id } : undefined;
-    done = ctx.registerFragment(id, regOpts);
+    const settle = ctx.registerFragment(id, regOpts);
+    done = (value, error, escaped) => ((container.open = false), settle(value, error, escaped));
+    container.open = true;
+    setFragmentContainer(o, container);
     let owners = fragmentOwners.get(ctx.registerFragment);
     if (!owners) fragmentOwners.set(ctx.registerFragment, (owners = {}));
     owners[id] = done;
@@ -611,7 +780,11 @@ function ssrLoadingBoundary(
     // registered in the same re-run owns the entry and its reveal slot.
     let disposed = false;
     let superseded = false;
-    onCleanup(() => (disposed = true));
+    onCleanup(() => {
+      disposed = true;
+      container.open = false;
+      setFragmentContainer(o, null);
+    });
     const abandon = () => {
       if (owners![id] !== done) return (superseded = true);
       delete owners![id];
@@ -646,15 +819,15 @@ function ssrLoadingBoundary(
     };
     (async () => {
       try {
-        // Convergence budget: each pass should retire at least one async
-        // slot, so passes are bounded by the boundary's async-slot count in
-        // any converging render — real trees sit far below this. A shape
+        // Convergence budget (`MAX_RESUME_PASSES`): each pass should retire
+        // at least one async slot, so passes are bounded by the boundary's
+        // async-slot count in any converging render. A shape
         // that plants a fresh pending source every pass (an async read whose
         // answer is never adoptable at the re-created slot) would otherwise
         // loop at microtask speed, serializing a new deferred per pass until
         // the process OOMs (#3003). Fail the boundary loudly instead.
         const checkBudget = () => {
-          if (passes <= 10000) return;
+          if (passes <= MAX_RESUME_PASSES) return;
           throw new Error(
             `<Loading> boundary discovery did not converge after ${passes} passes — ` +
               `an async source produces a new pending answer on every retry. Ensure repeated ` +
@@ -664,8 +837,11 @@ function ssrLoadingBoundary(
         while (retryPromise) {
           if (hasFinalHole()) return clientHandoff();
           checkBudget();
+          if (IS_DEV) waits!.start([retryPromise]);
           await retryPromise.catch(() => {});
           if (disposed) return abandon();
+          if (discarded) return;
+          if (IS_DEV) waits!.landed();
           ret = runDiscovery();
         }
         commitBoundaryState();
@@ -673,16 +849,27 @@ function ssrLoadingBoundary(
           const pending = ret as { t: string[]; h: Function[]; p: Promise<any>[] };
           if (hasFinalHole()) return clientHandoff();
           checkBudget();
+          if (IS_DEV) waits!.start(pending.p);
           await Promise.all(pending.p).catch(() => {});
           if (disposed) return abandon();
+          if (discarded) return;
+          if (IS_DEV) waits!.landed();
           passes++;
           ret = runLoadingPhase(() => resolveIn(() => ctx.ssr(pending.t, ...pending.h))) as any;
         }
         flushSerializeBuffer();
-        const streamed = done!(ret && Array.isArray(ret.t) ? ret.t[0] : ((ret && ret.t) as any));
+        let value = ret && Array.isArray(ret.t) ? ret.t[0] : ((ret && ret.t) as any);
+        if (regions.length) {
+          value = await drawRegions(value);
+          if (disposed) return abandon();
+          if (discarded) return;
+        }
+        const streamed = done!(value);
         record("settled", streamed);
       } catch (err) {
-        finalizeError(err);
+        // A failure whose outcome is still resolving settles when it lands.
+        const settling = finalizeError(err);
+        if (settling) await settling;
       } finally {
         // The slot settles either way: on error, `done(undefined, err)` wrote
         // the fragment template and rejects `key_fr`, so the client error path
@@ -720,6 +907,16 @@ export function NoHydration(props: { children: SolidElement }): SolidElement {
 /** Server: always `false` — nothing is claimed here. See the client entry. */
 export function isHydrating(): boolean {
   return false;
+}
+
+/**
+ * Server: runs `callback` in the next microtask — nothing hydrates here. See
+ * the client entry.
+ *
+ * @experimental
+ */
+export function onHydrationEnd(callback: () => void): void {
+  queueMicrotask(callback);
 }
 
 /**

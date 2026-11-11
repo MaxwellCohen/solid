@@ -1,6 +1,7 @@
 import {
   getNextElement,
   insert,
+  installHostTagging,
   runHydrationEvents,
   spread,
   SVGElements,
@@ -13,6 +14,8 @@ import {
 import {
   createComponent,
   createMemo,
+  // @ts-expect-error `createOwner` is `@internal` in solid-js's declarations (typed in
+  // solid-js/internal); importing it from solid-js keeps it one binding in the bundle.
   createOwner,
   createRoot,
   createSignal,
@@ -126,7 +129,7 @@ export type DynamicProps<T extends ValidComponent, P = ComponentProps<T>> = {
  * </Portal>
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/portal
+ * @description https://v2.solidjs.com/reference/solid-web/components/portal
  */
 export function Portal(props: { mount?: Element; children: JSX.Element }): JSX.Element {
   // Everything the portal allocates (content memo, effects, anchor memo)
@@ -174,6 +177,7 @@ function portalImpl(props: { mount?: Element; children: JSX.Element }): JSX.Elem
       // would accumulate. The owner parenting preserves context.
       const dispose = runWithOwner(owner, () =>
         createRoot(d => {
+          installHostTagging();
           insert(m, c, endMarker, undefined, { host: () => treeMarker.parentNode });
           return d;
         })
@@ -286,7 +290,7 @@ export { dynamicComponent } from "solid-js";
  * }
  * ```
  *
- * @description https://docs.solidjs.com/reference/components/dynamic
+ * @description https://v2.solidjs.com/reference/solid-web/components/dynamic
  */
 /**
  * A component from a reactive source. The source may answer with the
@@ -325,14 +329,16 @@ function staticElement(tag: string, props: any): JSX.Element {
   // CREATED (customized built-in / namespace), so they are read once here,
   // untracked — the DOM can't change either after creation — and then flow
   // through spread() like any attribute. Hydration claims the
-  // parser-namespaced node, so neither applies.
-  const el = hydrating
-    ? getNextElement()
-    : createElement(
-        tag,
-        untrack(() => props.is),
-        untrack(() => props.xmlns)
-      );
+  // parser-namespaced node, so neither applies — when it claims: a fresh
+  // render under hydration (a rejected fragment's, adopting by id) spends
+  // the key and creates, like a compiled template.
+  const create = () =>
+    createElement(
+      tag,
+      untrack(() => props.is),
+      untrack(() => props.xmlns)
+    );
+  const el = hydrating ? getNextElement(create) : create();
   spread(el, props);
   // Compiled JSX emits runHydrationEvents() after an element that carries
   // event handlers. Handlers bound through spread() here need the same call,

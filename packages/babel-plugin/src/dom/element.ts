@@ -11,6 +11,7 @@ import {
   VoidElements
 } from "../../../web/src/constants.js";
 import {
+  numberLiteral,
   evaluateAndInline,
   getAttributeNamed,
   getTagName,
@@ -29,6 +30,7 @@ import {
   escapeHTML,
   convertJSXIdentifier,
   isLockedDOMProperty,
+  isStatefulDOMProperty,
   trimWhitespace,
   inlineCallExpression,
   hasStaticMarker,
@@ -38,6 +40,7 @@ import {
 import { transformNode } from "../shared/transform";
 import { decodedAttrValue } from "../universal/element";
 import { namesBindings } from "../config";
+import { bindingOptions, sourceLocation } from "../shared/location";
 import { InlineElements, BlockElements } from "./constants";
 import type {
   BabelPath,
@@ -57,6 +60,7 @@ type DOMSetAttrOptions = {
   tagName?: string;
   styleProperty?: boolean;
   classProperty?: boolean;
+  checkableInput?: boolean;
 };
 type SpreadOptions = {
   elem: babelTypes.Expression;
@@ -242,7 +246,7 @@ export function transformElement(
           }
           if (value)
             a.get("value").replaceWith(
-              t.jSXExpressionContainer(t.callExpression(t.arrowFunctionExpression([], value), []))
+              t.jsxExpressionContainer(t.callExpression(t.arrowFunctionExpression([], value), []))
             );
         }
       });
@@ -354,7 +358,7 @@ export function setAttr(
   elem: babelTypes.Expression,
   name: string,
   value: babelTypes.Expression,
-  { dynamic, prevId, tagName, styleProperty, classProperty }: DOMSetAttrOptions = {}
+  { dynamic, prevId, tagName, styleProperty, classProperty, checkableInput }: DOMSetAttrOptions = {}
 ): babelTypes.Expression {
   // pull out namespace
   const config = getConfig(path);
@@ -428,10 +432,17 @@ export function setAttr(
     // carries the select-value retry and input/textarea nullish special cases.
     // `<select value>` always goes through it: a microtask only sees options
     // inserted in the same turn, so options that arrive later never get
-    // selected (#3928).
+    // selected (#3928). So does a non-literal value/defaultValue on an input
+    // that may be a checkbox or radio: a nullish value must remove the
+    // attribute so the checked box submits its native "on" (#4009, #4017),
+    // and setProperty already tests the live `type` for that.
     if (
       (config.hydratable && (isLocked || namespace !== "prop")) ||
-      (name === "value" && tagName === "select")
+      (name === "value" && tagName === "select") ||
+      (checkableInput &&
+        (name === "value" || name === "defaultValue") &&
+        !t.isStringLiteral(value) &&
+        !t.isNumericLiteral(value))
     ) {
       return t.callExpression(registerImportMethod(path, "setProperty"), [
         elem,
@@ -440,25 +451,28 @@ export function setAttr(
       ]);
     }
 
-    const assignment = t.assignmentExpression(
-      "=",
-      t.memberExpression(elem, t.identifier(name)),
-      value
-    );
     if (
       (name === "value" || name === "defaultValue") &&
       (tagName === "input" || tagName === "textarea") &&
       !t.isStringLiteral(value) &&
       !t.isNumericLiteral(value)
     ) {
-      // prevents undefined on input/textarea.value/defaultValue, fallback to empty string
-      return t.assignmentExpression(
-        "=",
-        t.memberExpression(elem, t.identifier(name)),
-        t.logicalExpression("??", value, t.stringLiteral(""))
-      );
+      // prevents undefined on text input/textarea.value/defaultValue, fallback
+      // to empty string (#2957)
+      value = t.logicalExpression("??", value, t.stringLiteral(""));
     }
-    return assignment;
+    // Dev DOM output writes stateful properties (value/checked/selected/
+    // muted) through `setStatefulProperty` — the same `elem[name] = value`,
+    // preceded in the dev runtime by the UNCOMMITTED_INPUT_OVERWRITTEN check
+    // (#4186). Production output keeps the inline assignment, byte for byte.
+    if (config.dev && config.generate === "dom" && isStatefulDOMProperty(tagName, name)) {
+      return t.callExpression(registerImportMethod(path, "setStatefulProperty"), [
+        elem,
+        t.stringLiteral(name),
+        value
+      ]);
+    }
+    return t.assignmentExpression("=", t.memberExpression(elem, t.identifier(name)), value);
   }
 
   const ns = name.indexOf(":") > -1 && Namespaces[name.split(":")[0]];
@@ -492,6 +506,35 @@ function detectResolvableEventHandler(
   return t.isFunction(handler);
 }
 
+/**
+ * Whether an `<input>` may be a checkbox or radio, whose nullish
+ * value/defaultValue removes the `value` attribute (restoring the native "on"
+ * submission value) instead of clearing it to "" like a text field (#4017).
+ * Only a plain `type` written as a string literal is resolved here; a missing
+ * `type` is a text input. Anything else (an expression, `prop:type`,
+ * `attr:type`, a spread) is unknown and treated as possibly checkable, which
+ * stays correct because setProperty tests the live `type`. Mirrored by the
+ * native compiler's `input_may_be_checkable` (dom/attrs.rs).
+ */
+function inputMayBeCheckable(node: babelTypes.JSXElement): boolean {
+  let checkable = false;
+  for (const attribute of node.openingElement.attributes) {
+    if (t.isJSXSpreadAttribute(attribute)) return true;
+    const name = attribute.name;
+    if (t.isJSXNamespacedName(name)) {
+      if (name.name.name === "type") return true;
+      continue;
+    }
+    if (name.name !== "type") continue;
+    let value: babelTypes.Node | null | undefined = attribute.value;
+    if (t.isJSXExpressionContainer(value)) value = value.expression;
+    if (value == null) checkable = false;
+    else if (t.isStringLiteral(value)) checkable = /^(checkbox|radio)$/i.test(value.value);
+    else return true;
+  }
+  return checkable;
+}
+
 function transformAttributes(
   path: BabelPath<babelTypes.JSXElement>,
   results: DOMTransformResult
@@ -504,7 +547,8 @@ function transformAttributes(
   const tagName = getTagName(path.node),
     hasChildren = path.node.children.length > 0,
     hasSpread = attributes.some(attribute => t.isJSXSpreadAttribute(attribute.node)),
-    config = getConfig(path);
+    config = getConfig(path),
+    checkableInput = tagName === "input" && inputMayBeCheckable(path.node);
   const refs: babelTypes.Statement[] = [];
 
   // preprocess spreads
@@ -674,6 +718,8 @@ function transformAttributes(
           t.jsxExpressionContainer(p.value as babelTypes.Expression)
         );
         (newAttr as babelTypes.JSXAttribute & { _styleProperty?: boolean })._styleProperty = true;
+        // The split-out property is located at the `style` attribute it came from.
+        newAttr.loc = styleObjectAttribute.node.loc;
         path
           .get("openingElement")
           .node.attributes.splice(Number(styleObjectAttribute.key) + ++i, 0, newAttr);
@@ -724,13 +770,16 @@ function transformAttributes(
       )
     ) {
       classArrayAttribute.node.value = t.stringLiteral(staticClasses.join(" "));
+      const dynamicClassAttribute = t.jsxAttribute(
+        t.jsxIdentifier("class"),
+        t.jsxExpressionContainer(dynamicClassElement)
+      );
+      // `sourceNames.locations`: the split-out object locates at the array
+      // attribute it came from.
+      dynamicClassAttribute.loc = classArrayAttribute.node.loc;
       path
         .get("openingElement")
-        .node.attributes.splice(
-          Number(classArrayAttribute.key) + 1,
-          0,
-          t.jsxAttribute(t.jsxIdentifier("class"), t.jsxExpressionContainer(dynamicClassElement))
-        );
+        .node.attributes.splice(Number(classArrayAttribute.key) + 1, 0, dynamicClassAttribute);
     }
   }
 
@@ -776,6 +825,8 @@ function transformAttributes(
           t.jsxExpressionContainer(p.value as babelTypes.Expression)
         );
         (newAttr as babelTypes.JSXAttribute & { _classProperty?: boolean })._classProperty = true;
+        // The split-out property is located at the `class` attribute it came from.
+        newAttr.loc = classListAttribute.node.loc;
         path
           .get("openingElement")
           .node.attributes.splice(Number(classListAttribute.key) + ++i, 0, newAttr);
@@ -947,7 +998,7 @@ function transformAttributes(
           ((type = typeof evaluated) === "string" || type === "number" || type === "boolean")
         ) {
           if (type === "number" && key.startsWith("prop:")) {
-            value = t.jsxExpressionContainer(t.numericLiteral(evaluated));
+            value = t.jsxExpressionContainer(numberLiteral(evaluated));
           } else if (type === "boolean") {
             value = t.jsxExpressionContainer(t.booleanLiteral(evaluated));
           } else value = t.stringLiteral(String(evaluated));
@@ -958,7 +1009,9 @@ function transformAttributes(
         reservedNameSpace &&
         !t.isJSXExpressionContainer(value)
       ) {
-        node.value = value = t.jsxExpressionContainer(value || t.jsxEmptyExpression());
+        // A valueless `prop:x` means `prop:x={true}`, like a bare plain
+        // attribute (#4180).
+        node.value = value = t.jsxExpressionContainer(value || t.booleanLiteral(true));
       }
       if (
         t.isJSXExpressionContainer(value) &&
@@ -1182,14 +1235,20 @@ function transformAttributes(
             key,
             value: value.expression,
             tagName,
+            checkableInput,
             styleProperty: isStyleProperty,
-            classProperty: isClassProperty
+            classProperty: isClassProperty,
+            // `sourceNames.locations`: the attribute's start (for a property
+            // split out of a `style={{…}}` / `class={{…}}` object, the
+            // object attribute's start — see the pre-passes above).
+            loc: sourceLocation(attribute, attribute.node)
           });
         } else {
           results.exprs.push(
             t.expressionStatement(
               setAttr(attribute, elem, key, value.expression, {
                 tagName,
+                checkableInput,
                 styleProperty: isStyleProperty,
                 classProperty: isClassProperty
               })
@@ -1238,7 +1297,10 @@ function transformAttributes(
         ) {
           results.exprs.push(
             t.expressionStatement(
-              setAttr(attribute, elem, key, staticValue as babelTypes.Expression, { tagName })
+              setAttr(attribute, elem, key, staticValue as babelTypes.Expression, {
+                tagName,
+                checkableInput
+              })
             )
           );
         } else {
@@ -1340,6 +1402,10 @@ function transformChildren(
         if (!transformed) return memo;
         (transformed as TransformResult & { allocatesIds?: boolean }).allocatesIds = allocatesIds;
         (transformed as TransformResult & { functionHole?: boolean }).functionHole = functionHole;
+        // `sourceNames.locations`: where the hole is written, for its insert
+        // (a spread child `{...items()}` is a hole too).
+        if (child.isJSXExpressionContainer() || child.isJSXSpreadChild())
+          transformed.loc = sourceLocation(child, child.node);
         const i = memo.length;
         if (transformed.text && i && memo[i - 1].text) {
           memo[i - 1].template =
@@ -1423,14 +1489,11 @@ function transformChildren(
       // is inserted directly and creates no effect to name.
       const accessorHole =
         child.dynamic || (child as TransformResult & { functionHole?: boolean }).functionHole;
+      // `sourceNames.locations`: `loc` after `name`, the hole's `{` start.
       const emitInsert = (args: babelTypes.Expression[]) => {
         if (accessorHole && namesBindings(getConfig(path))) {
           while (args.length < 4) args.push(t.identifier("undefined"));
-          args.push(
-            t.objectExpression([
-              t.objectProperty(t.identifier("name"), t.stringLiteral(`${tagName}.children`))
-            ])
-          );
+          args.push(bindingOptions(`${tagName}.children`, child.loc));
         }
         results.exprs.push(t.expressionStatement(t.callExpression(insert, args)));
       };
@@ -1730,7 +1793,14 @@ function processSpreads(
   // `sourceNames.bindings`: the tag as written rides as spread's trailing
   // argument (past the runtime-only `skip` slot); the runtime labels its
   // attribute effect `<tag>.spread` and its children insert `<tag>.children`.
-  if (namesBindings(config)) args.push(t.identifier("undefined"), t.stringLiteral(tagName));
+  // `sourceNames.locations`: the first spread attribute's start (`{...`)
+  // follows the name as one more string argument.
+  if (namesBindings(config)) {
+    args.push(t.identifier("undefined"), t.stringLiteral(tagName));
+    const spread = attributes.find(a => t.isJSXSpreadAttribute(a.node));
+    const loc = spread && sourceLocation(spread, spread.node);
+    if (loc !== undefined) args.push(t.stringLiteral(loc));
+  }
 
   return [
     filteredAttributes,

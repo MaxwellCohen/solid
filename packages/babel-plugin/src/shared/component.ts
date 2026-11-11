@@ -6,6 +6,8 @@ import {
   registerImportMethod,
   filterChildren,
   getCoverageIgnoreComments,
+  reclaimCoverageIgnoreComments,
+  takeCoverageIgnoreCommentsForParent,
   trimWhitespace,
   transformCondition,
   convertJSXIdentifier
@@ -14,6 +16,7 @@ import { transformNode, getCreateTemplate, thisTagIdentifiers } from "./transfor
 import { markPropsLiteral } from "../ssr/props";
 import { decodedAttrValue } from "../universal/element";
 import { sourceNames, type PluginConfig } from "../config";
+import { sourceLocation } from "./location";
 import type { BabelPath, JSXNode, TransformResult } from "../types";
 
 type JSXAttributePath = BabelPath<t.JSXAttribute | t.JSXSpreadAttribute>;
@@ -334,6 +337,11 @@ export default function transformComponent(
     });
 
   const childResult = transformComponentChildren(path.get("children"), config);
+  // Pragmas written immediately before this component (a parent's
+  // `filterChildren` hand-off) lead this getter, not the parent's (#2138).
+  // When there is no children getter to put them on, leave them on the path
+  // so the parent can fall back (#4701).
+  const beforeComponentComments = getCoverageIgnoreComments(path);
   if (childResult) {
     if (childResult[1]) {
       const body =
@@ -348,7 +356,12 @@ export default function transformComponent(
         [],
         t.isExpression(body) ? t.blockStatement([t.returnStatement(body)]) : body
       );
-      if (childResult[2]?.length) getter.leadingComments = childResult[2];
+      const coverageComments = [...(beforeComponentComments ?? []), ...(childResult[2] ?? [])];
+      if (coverageComments.length) {
+        getter.leadingComments = coverageComments;
+        // Consumed — parent must not also fall back these onto its getter.
+        path.setData("solid.coverageIgnoreComments", undefined);
+      }
       runningObject.push(getter);
     } else runningObject.push(t.objectProperty(t.identifier("children"), childResult[0]));
   }
@@ -370,6 +383,10 @@ export default function transformComponent(
     sourceNames(config).components && (config.generate === "dom" || config.generate === "ssr");
   if (labelled) {
     componentArgs.push(t.stringLiteral(tagName));
+    // `sourceNames.locations`: the opening element's start (`<Home`) as a
+    // fourth argument, `file:line:col`, so a diagnostic can point at the JSX.
+    const loc = sourceLocation(path, path.node.openingElement);
+    if (loc !== undefined) componentArgs.push(t.stringLiteral(loc));
   }
   // SSR's prod `createComponent` is literally `Comp(props || {})`. Since the
   // compiler always emits a real `props[0]` object expression above (see the
@@ -414,7 +431,10 @@ function transformComponentChildren(
 
   let transformedChildren: t.Expression | t.Expression[] = filteredChildren.reduce(
     (memo: t.Expression[], path: BabelPath<JSXNode>) => {
-      coverageIgnoreComments ||= getCoverageIgnoreComments(path);
+      const taken = takeCoverageIgnoreCommentsForParent(path);
+      if (taken?.length) {
+        coverageIgnoreComments = [...(coverageIgnoreComments ?? []), ...taken];
+      }
       if (t.isJSXText(path.node)) {
         const v = decode(trimWhitespace((path.node.extra?.raw as string | undefined) ?? ""));
         if (v.length) {
@@ -427,6 +447,12 @@ function transformComponentChildren(
           componentChild: true,
           lastElement: true
         });
+        // Nested component with no children getter leaves the hand-off on the
+        // path (fragments transparent) — reclaim for this parent's getter (#4701).
+        const reclaimed = reclaimCoverageIgnoreComments(path);
+        if (reclaimed?.length) {
+          coverageIgnoreComments = [...(coverageIgnoreComments ?? []), ...reclaimed];
+        }
         if (!child) return memo;
         dynamic = dynamic || !!child.dynamic;
         if (

@@ -172,12 +172,16 @@ describe("a single-flight server-component call carries its invocation id (#3641
       FRAME_STREAM_HEADER,
       frameTransformDirectResult,
       frameTransformFlightResult,
-      frameTransformResult,
-      renderServerComponent
+      frameTransformResult
     } from "@solidjs/web/frames/server";
     import { provideRequestEvent } from "@solidjs/web/storage";
 
     createServerReference(registerServerReference("view-1", async () => () => "view markup"));
+    createServerReference(
+      registerServerReference("view-select", async () => () =>
+        ssr('<select value="b"><option value="a">A</option><option value="b">B</option></select>')
+      )
+    );
 
     let handlerSawInvocation;
     configureServerFunctionsServer({
@@ -193,32 +197,34 @@ describe("a single-flight server-component call carries its invocation id (#3641
       collectFlightData: async () => ({ "route-data[]": { title: "x" } })
     });
 
-    const res = await handleServerFunctionRequest(
-      new Request("http://localhost/_server/data/view-1", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: "http://localhost",
-          "sec-fetch-site": "same-origin",
-          "x-server-function-format": "3",
-          "x-single-flight": "true"
-        },
-        body: "[]"
-      })
-    );
-    const text = await res.text();
-    // Length-prefixed frames: \`;0x<8 hex>;\` + JSON.
-    const chunks = text
-      .split(/;0x[0-9a-f]{8};/)
-      .filter(Boolean)
-      .map(s => JSON.parse(s))
-      .map(({ type, id, html }) => ({ type, id, html }));
+    const call = (id, singleFlight) =>
+      handleServerFunctionRequest(
+        new Request("http://localhost/_server/data/" + id, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "http://localhost",
+            "sec-fetch-site": "same-origin",
+            "x-server-function-format": "3",
+            ...(singleFlight ? { "x-single-flight": "true" } : {})
+          },
+          body: "[]"
+        })
+      );
+    // Length-prefixed frames: \`;0x<8 hex>;\` + JSON — record batches
+    // (\`{ id, version, r }\`) beside the \`start\` / \`outcome\` messages.
+    const chunksOf = async res =>
+      (await res.text())
+        .split(/;0x[0-9a-f]{8};/)
+        .filter(Boolean)
+        .map(s => JSON.parse(s))
+        .map(({ type, id, r }) => ({ type, id, keys: r && Object.keys(r), html: r && r[""] && r[""].value }));
+
+    const res = await call("view-1", true);
+    const chunks = await chunksOf(res);
 
     ssrSelectValues();
-    const frame = await renderServerComponent(
-      () => ssr('<select value="b"><option value="a">A</option><option value="b">B</option></select>'),
-      { frame: { id: "f", version: 1 } }
-    );
+    const frame = await chunksOf(await call("view-select", false));
 
     process.stdout.write(
       JSON.stringify({
@@ -227,7 +233,7 @@ describe("a single-flight server-component call carries its invocation id (#3641
         contentType: res.headers.get("content-type"),
         handlerSawInvocation,
         chunks,
-        selectHtml: frame.find(c => c.type === "html").html
+        selectHtml: frame.find(c => c.html !== undefined).html
       })
     );
   `;
@@ -266,8 +272,8 @@ describe("a single-flight server-component call carries its invocation id (#3641
       expect(out.header).toBe("view-1");
       expect(out.chunks).toEqual([
         { type: "start", id: "view-1" },
-        { type: "html", id: "view-1", html: "view markup" },
-        { type: "complete", id: "view-1" },
+        { id: "view-1", keys: [""], html: "view markup" },
+        { id: "view-1", keys: [":complete"] },
         expect.objectContaining({ type: "outcome" })
       ]);
       // The renderer behind the frame stream is the one compiled output arms.

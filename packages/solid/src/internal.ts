@@ -25,7 +25,8 @@
  *    The boundary primitives behind `Errored`, `Loading`, and `Reveal` are
  *    read back the same way (real on both entries), for renderers that
  *    build boundaries without the components, and so are `sharedConfig`
- *    (the hydration/SSR coordination object) and the `$DEVCOMP` brand.
+ *    (the hydration/SSR coordination object), the `$DEVCOMP` brand and
+ *    `createOwner` (a bare owner for a runtime's own scope).
  *
  * Not here: the container-trace materializer. It lives in its own entry,
  * `solid-js/internal/container-trace`, so the store engine it builds on can
@@ -37,6 +38,7 @@ import type {
   Accessor,
   Component,
   DynamicOptions,
+  Owner,
   RevealOrder,
   ServerErrorHook,
   ServerErrorSite
@@ -91,35 +93,72 @@ export const inLiveServerComponentScope: () => boolean = core.inLiveServerCompon
  * when branded with `markSafeError`, else one generic `Error` per original
  * (recorded once as `SERVER_ERROR_SANITIZED`, `data.source: "ssr"`). `subject` locates the finding;
  * `null` from a serialization funnel. With a `site`, the hook hears of it
- * first (`hook` as `reportServerError` takes it). Client: identity.
+ * first (`hook` and `scope` as `reportServerError` takes them). Client: identity.
  */
 export const ssrSanitizeError: (
   value: unknown,
   subject?: object | null,
   site?: ServerErrorSite,
-  hook?: ServerErrorHook
+  hook?: ServerErrorHook,
+  scope?: object
 ) => unknown = core.ssrSanitizeError;
 
 /**
  * Server: tells the server error hook about a failure — once per error
- * object, at first sight — with where it was met; `{ mapped: true, value }`
- * when the hook gave a wire value (now or earlier), `{ mapped: false }`
- * otherwise. `hook` is the hook of the render or request the failure
+ * object per kind per request (per render outside one), at first sight — with where
+ * it was met; `{ mapped: true, value }` when the hook gave a wire value (now
+ * or earlier), `{ mapped: false }` otherwise. `hook` is the hook of the render or request the failure
  * belongs to (a render's `onError`, the server-function handler's) — the
  * caller's to name, never read off the global SSR context — ahead of the
- * ambient registration; `undefined` leaves the ambient one alone.
- * Client: `{ mapped: false }`.
+ * ambient registration; `undefined` leaves the ambient one alone. `scope`
+ * is the render's ledger scope (its context's `_errorScope`) when the caller
+ * has it; else the request in scope is. Client: `{ mapped: false }`.
  */
 export const reportServerError: (
   value: unknown,
   site: ServerErrorSite,
   subject?: object | null,
-  hook?: ServerErrorHook
+  hook?: ServerErrorHook,
+  scope?: object
 ) => { mapped: boolean; value?: unknown } = core.reportServerError as any;
 export type { ServerErrorSite, ServerErrorHook } from "solid-js";
 
 /** Server: a monotonic stamp for owner creation order. Client: `0`. */
 export const creationStamp: () => number = core.creationStamp;
+
+/**
+ * Client: set (or clear, `null`) a callback run before every signal or store
+ * write lands — the server-components client's deferred hydration mounts
+ * what it left unmounted. Server: no-op.
+ */
+export const setWriteHook: (hook: ((node?: object) => void) | null) => void =
+  core.setWriteHook as any;
+/** Dependency edges. Client: name plain signals (`<owner id>~<n>`) from now on. Server: no-op. */
+export const setSignalIdentities: (on: boolean) => void = core.setSignalIdentities;
+/**
+ * Dependency edges. Server: a render that names and tracks plain signals
+ * starts; call the returned function when it ends. Client: no-op.
+ */
+export const beginEdgesRender: () => () => void = core.beginEdgesRender;
+/** Dependency edges, dev only. Client: watch every node read. Server: no-op. */
+export const setReadWatch: (watch: ((node: object) => void) | null) => void = core.setReadWatch;
+/** Dependency edges. Client: a plain signal's identity, if it was named. Server: `undefined`. */
+export const signalName: (node: object | undefined) => string | undefined = core.signalName;
+/**
+ * Dependency edges. Client: the name a store proxy's writes go by (its
+ * root's, when the root was named and can be placed). Server: `undefined`.
+ */
+export const storeName: (proxy: object | undefined) => string | undefined = core.storeName;
+/**
+ * Dependency edges. Server: run a slot fill, returning the plain-signal
+ * identities it read (through memos too) and whether it ran a computation
+ * whose reads the server cannot see. Client: runs it.
+ */
+export const trackFillReads: <T>(fn: () => T) => {
+  result: T;
+  reads: Set<string> | null;
+  untracked: boolean;
+} = core.trackFillReads;
 
 /** Server: the live projection trace behind a value, if any. Client: `undefined`. */
 export const getProjectionTrace: (
@@ -133,6 +172,19 @@ export const getProjectionTrace: (
  */
 export const shareAsyncIterable: <T>(source: AsyncIterable<T>) => AsyncIterable<T> =
   core.shareAsyncIterable;
+
+/**
+ * A fresh owner under the current one (or a detached root if there is none),
+ * for a runtime's own scope: `NoHydration`, `Portal`, a frame's fill. `id`
+ * seeds the hydration ids of the tree it owns; `transparent` lets that tree
+ * draw ids from the parent's counter. Its `dispose` is a method
+ * (`owner.dispose()`), not a detached function. Not application API: an app
+ * hosts a scope with `createRoot()` and re-enters one with `runWithOwner()`.
+ */
+export const createOwner: (options?: {
+  id?: string;
+  transparent?: boolean;
+}) => Owner & { dispose(self?: boolean): void } = core.createOwner;
 
 /** The primitive behind `<Errored>`: `fn()`, or `fallback(error, reset)` once something under it throws. */
 export const createErrorBoundary: <T, U>(

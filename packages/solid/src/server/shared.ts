@@ -29,8 +29,10 @@ export type HydrationContext = {
    * In renderToStream (async: true), accepts promises and async iterables.
    * In renderToString (async: false), only synchronous values are allowed —
    * passing async values will throw.
+   * @internal `errorRecord` marks an `<Errored>` record: a renderer that
+   * cannot encode it sends a plain `Error` instead of failing the render.
    */
-  serialize: (id: string, v: any, deferStream?: boolean) => void;
+  serialize: (id: string, v: any, deferStream?: boolean, errorRecord?: boolean) => void;
   resolve(value: any): SSRTemplateObject;
   ssr(template: string[], ...values: any[]): SSRTemplateObject;
   escape(value: any): string;
@@ -119,6 +121,19 @@ export type HydrationContext = {
    */
   errorPolicy?: (error: unknown, context: any) => unknown | void;
   /**
+   * @internal The scope the server error hook's once-per-error ledger keys
+   * on for this render (see `reportServerError`): the request event it
+   * started under, else an object of its own. Set by @solidjs/web.
+   */
+  _errorScope?: object;
+  /**
+   * @internal Tells the renderer that an `<Errored>` contained `error` and
+   * sends `wire` in its place. A rejection the renderer cannot encode does
+   * not fail the render when its reason is one of the two. Set by
+   * @solidjs/web's renderToStream.
+   */
+  contained?: (error: unknown, wire: unknown) => void;
+  /**
    * @internal Whether the shell has flushed — a fragment that fails now
    * rejects to the client (`handling: "client"`) rather than failing the
    * request or inlining into a parent's fallback. Set by @solidjs/web's
@@ -168,6 +183,16 @@ export type HydrationContext = {
    * @solidjs/web's render core; holds gate only the end of the response.
    */
   hold?: () => () => void;
+  /**
+   * Document renders only (set alongside `commit` by @solidjs/web's
+   * document live-hole arming): told when the render serves something a
+   * later commit in this response will replace — a server-owned async
+   * iterable classified to pump, a loading value or seed served ahead of
+   * its landing. Called before that value can be read, so a hole minted
+   * while it has never been called read only final values, and ships
+   * unmarked.
+   */
+  unsettled?: () => void;
 };
 
 export const NoHydrateContext: Context<boolean> = {
@@ -251,6 +276,8 @@ export function installServerWithOrigin(observe: Observe): void {
     },
     withInteraction: slot.withInteraction,
     currentOrigin: slot.currentOrigin,
+    markFlight: slot.markFlight,
+    flightOrigin: slot.flightOrigin,
     withOrigin<T>(ref: NavigationRef, fn: () => T): T {
       if (ref.initial === true) sharedConfig.context?._declareRoute?.(ref);
       return inner(ref, fn);

@@ -1,6 +1,5 @@
 import {
   createMemo,
-  createRoot,
   setContext,
   getContext,
   flatten,
@@ -8,6 +7,7 @@ import {
   serverComponentContextError
 } from "./signals.js";
 import type { Accessor, EffectOptions } from "./signals.js";
+import { IS_DEV } from "./diagnostics.js";
 import type { ArrayElement, Element as SolidElement } from "../types.js";
 import type { FlowComponent, FlowProps } from "./component.js";
 
@@ -39,14 +39,28 @@ export interface Context<T> extends ContextProviderComponent<T> {
  */
 export function createContext<T>(defaultValue?: T, options?: EffectOptions): Context<T> {
   const id = Symbol((options && options.name) || "");
+  // No owner of its own: the value goes on the two memos that resolve the
+  // children, set on each one's first pass (`p` is undefined only then; a
+  // repeat on a falsy value is harmless). The inner memo runs the children
+  // getter; the outer flattens, calling function children in scope. Both
+  // are needed: one memo would re-create every child whenever a nested
+  // accessor changed.
   function provider(props: FlowProps<{ value: unknown }>) {
-    return createRoot(() => {
-      setContext(provider, props.value);
-      return children(() => props.children);
+    const value = props.value;
+    const c = createMemo((p: unknown) => (p || setContext(provider, value), props.children), {
+      lazy: true
+    });
+    return createMemo((p: unknown) => (p || setContext(provider, value), flatten(c())), {
+      lazy: true,
+      sync: true
     });
   }
   provider.id = id;
   provider.defaultValue = defaultValue;
+  // Dev: an explicit `undefined` default is still no default (`undefined`
+  // means "not provided"); remembered so a failed read can say so (#4181).
+  if (IS_DEV && arguments.length && defaultValue === undefined)
+    (provider as any)._undefinedDefault = true;
   return provider as unknown as Context<T>;
 }
 

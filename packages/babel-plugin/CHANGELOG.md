@@ -1,5 +1,64 @@
 # @solidjs/babel-plugin
 
+## 2.0.0-rc.21
+
+### Patch Changes
+
+- d815fd4: Keep a returned element's setup inside a braceless `if`, `else` or loop body. `if (c) return <span>{x.join()}</span>;` emitted the template clone and `insert` before the `if`, so they ran (and `x.join()` threw) when `c` was false, a loop body's setup read its loop variable out of scope, and a hydrating `getNextElement` claimed a node for a branch not taken. The setup is now inserted before the `return`, and Babel wraps the body in a block.
+
+## 2.0.0-rc.20
+
+### Patch Changes
+
+- 56683ea: SSR templates write characters above U+00FF in static text and quoted attribute values as numeric character references (`→` becomes `&#8594;`), as do the static attributes baked into a spread element's attribute string. One character above U+00FF in a template made V8 store the whole rendered page as a two-byte string, which roughly doubled the cost of flattening and UTF-8 encoding the response (#4328). Latin-1 characters stay literal. Tag internals, comments, raw-text bodies such as `<script>` and `<style>`, and the children of a spread `<script>` or `<style>` keep their characters, since browsers do not decode references there. Client output is unchanged.
+
+## 2.0.0-rc.19
+
+### Patch Changes
+
+- 8cff139: Evaluated negative and non-finite numbers (`c={-1}`, `d={NaN}`) are static again. Since Babel 8 support, `evaluateAndInline` built them with `t.valueToNode`, which gives `-1` / `0 / 0` expressions rather than numeric literals, so they stopped being inlined into templates (SSR emitted `ssrAttribute("c", -1)` instead of `c="-1"`) and diverged from `@solidjs/compiler` (the parity probes' "exotic literal holes"). They are now NumericLiteral nodes again, built directly where @babel/types 8's builder would reject the value; both Babel majors print them as before.
+- 55c7329: Support `@babel/core` 8 alongside 7: the peer range is now `^7.20.12 || ^8.0.0`. SSR no longer reads `Scope#uids` (removed in Babel 8), evaluated negative or non-finite numbers are built with `valueToNode`, `import()` parsed as `ImportExpression` stays dynamic, and TSRX emits the AST shape of the running Babel major (type arguments, type parameter names, `import()`, enums, heritage). TSRX also keeps `import()` options and class method type parameters, which it dropped before.
+- 9e1edbc: A lone dynamic spread on an SSR element (`<label {...props()} />`) now defers behind a thunk like a spread beside other attributes, so it runs after the element's hydration key. A spread that created a memo shifted the element's key on the server only, and hydration missed the element (#4240).
+
+## 2.0.0-rc.18
+
+## 2.0.0-rc.17
+
+### Patch Changes
+
+- 3e72783: The removed Solid 1.x attribute forms are now compile errors on native elements in the `dom` and `ssr` generates (#4187). `on:`, `oncapture:`, `attr:`, `bool:`, `use:` and `classList` used to compile silently into literal attributes (`<div use:tip="() => {}">`, `classlist="[object Object]"`). Both compilers now reject them with the same message, which names the 2.0 replacement: a camelCase handler or a `ref` callback for `on:`, a plain attribute for `attr:`, a boolean value for `bool:`, a `ref` directive factory for `use:`, and an object or array `class` for `classList`. Components, the universal generate, `prop:` and the XML namespaces (`xlink:`, `xml:`, `xmlns:`) are unaffected. The check runs only at compile time and adds no runtime code.
+- 6cca8b5: Dev builds now warn with `UNCOMMITTED_INPUT_OVERWRITTEN` (#4186) when a stateful DOM property binding (`value`/`checked` on an input, `value` on a textarea, `value`/`selected` on an option, `muted` on media) is about to re-write the value it wrote last time over an edit the user never committed to the bound signal — e.g. `value={props.name} onChange={commit}` with no draft signal, when another dynamic attribute in the same template changes. Runtime behavior is unchanged: the write still happens, once per element and property the warning names the fix (write the signal from `onInput`, use `defaultValue`/`defaultChecked` for an uncontrolled element, or write a rejected edit back with `e.currentTarget.value = next`).
+
+  Production output is unchanged byte for byte. In dev DOM output both compilers write stateful properties through a new `setStatefulProperty(el, name, value)` helper instead of the inline `el.name = value`; hydratable output keeps `setProperty`, and `spread`/`assign` check in the runtime. The check lives only in `@solidjs/web`'s dev build; the production entry carries a plain `node[name] = value` stub that no production-compiled module imports, so it tree-shakes away.
+
+  The "Form inputs" section of the DOM RFC, the cheatsheet and the solid-2.0 skill now say that a change to any other dynamic attribute in the same template re-runs a stateful binding, link the new code, and drop `equals: false` as a way to reject input (it is what the warning reports); write the accepted value back with `e.currentTarget.value = next` instead.
+
+- 2ba1c4a: A valueless `prop:` attribute (`<el prop:active />`) now compiles as `prop:active={true}`, matching bare plain attributes, instead of being dropped silently (#4180).
+
+## 2.0.0-rc.16
+
+### Patch Changes
+
+- 4a99c84: `sourceNames` gains a `locations` kind (and the plugin a `root` option): component and binding labels carry a `file:line:col` for diagnostics. `createComponent(Home, props, "Home", "src/App.tsx:12:5")` points at the `<Home` opening element (DOM and SSR output); a binding's options gain `loc` after `name` — the attribute's start for an attribute effect (a merged effect points at the first attribute it lists), the hole's `{` for an insert — and a spread passes it after the tag (`spread(el, props, false, undefined, "div", "src/App.tsx:20:12")`). The path is relative to `root` (default: the working directory) with `/` separators; line and column are 1-based, so a dev server links the location straight to the source. Like the other kinds, `locations` follows `dev` when unset, `true` turns every kind on, and the object form picks; a location is only emitted beside its label, and never when Babel has no `filename` for the module.
+- 3f36f77: Server components: binding slots are removed. Client components in slots replace them: place a client component through a `Slot` (`<props.x />`) where the server's markup needs client behavior, or a form `action` for a mutation. Removed with them: the `BindingSlot`, `SlotOutput` and `SlotError` types, the lazy `@solidjs/web/frames/bind` entry and its `"bind"` tier, the `_s:*` position markers and the compiled `ssrClaim` hole, the effect of the `serverComponents` compiler option (`@solidjs/compiler` and `@solidjs/babel-plugin` still accept it, so existing build configs keep working, and ignore it), and the `BINDING_SLOT_POSITION` diagnostic code (`@solidjs/signals`' `DiagnosticCode`, `solid-js`'s `diagnostics.json`). Ordinary slots, their `slot:<id>` ranges and records, and `$key` are unchanged.
+- d0ba31c: SSR evaluates a `ref` expression beside a spread, as it already does without one, so a ref factory's owned setup (`ref={tooltip()}`) runs on the server too and the hydration ids after it line up. The ref itself is still never called on the server (#4081). Under `serverComponents` the same holds outside a server component's render, where a ref expression was never evaluated on either path; inside one the claim evaluates it, once.
+
+## 2.0.0-rc.15
+
+### Patch Changes
+
+- 617d195: Emit element claims after the element's initial attributes are applied (#3923), at parity across both compilers.
+
+  A fully static `a[href]` / `form[action]` is claimed at the end of its creation statements (after static writes and refs). An element with dynamic bindings captures its owner at creation (`var _o$ = _$getOwner()`) and is claimed as the last statement of its binding effect's callback — `_$claimElement(_el$, _o$)` — in both the single-binding and the multi-binding shapes, so the claim observes the applied values on the first run whether that run is synchronous or lands from a held flush. An element carrying a spread emits no compiled claim: the `spread` runtime claims it after the first application.
+
+- ca15970: Non-hydratable client builds now remove the `value` attribute when a checkbox or radio input binds a nullish `value` or `defaultValue`, matching the runtime fix from #4009, so a checked box submits `"on"` instead of `""`. Both compilers route these bindings through `setProperty` when the input's static `type` is `checkbox` or `radio`, or when its `type` cannot be known at compile time (an expression, `prop:type`, `attr:type`). Text inputs, inputs without a `type`, and textareas still clear to `""` inline (#2957).
+- 43570f8: Reapply a select's bound value when its options arrive after the value was written.
+- 22f942d: SSR: a router can mark links in server HTML (#3878). Element claims never fire during SSR, so plain anchors arrived without `aria-current="page"` / `data-active` — late on hydrated pages, never on pages that do not hydrate. Both compilers now give every candidate `<a href>` in SSR output one hole after its attributes, `ssrLinkClaim(attrs)`, where a render's **link handler** writes the anchor's link state and `""` otherwise. A static anchor's hole is one eager call over a hoisted attributes object (no allocation per render); a dynamic anchor's joins the element's attribute group and reuses the raw value its `href` hole evaluated. Anchors the compiler can rule out — a static non-empty `target`, a `download`, a `rel` naming `external`, an author-written `aria-current`, an empty href or a non-HTTP scheme — get no hole at all. The hole creates no owner and takes no hydration id. A spread anchor's link attributes are collected by `ssrElement` from its winning sources (an anchor's trailing link attributes stay a source instead of baked tail markup).
+
+  New server API (`@experimental`): `setLinkClaim(handler)` sets the handler of the render the caller belongs to — found through the owner chain like `getHydrationWriter()`, so concurrent renders never share one — and returns `false` outside a render; `undefined` clears it. The handler, `(attrs) => string`, receives the anchor's link-relevant attributes (`href`, `target`, `rel`, `download`, `link`, `aria-current`, raw values as written) and returns its attribute markup. An author-written `aria-current` always wins. Server components inline in the document render under the page's handler; a server component's own frame stream has none unless its render sets one.
+
+  Trust marker: the first `setLinkClaim` of a render writes the `links` hydration record once (`_$HY.r.links = 1`, with the shell's hydration script on the document face, a data record on a frame stream). `hasServerLinkState()` (client; `false` on the server) reads it non-destructively, so a link consumer can tell "this page's anchors carry the server's link state" from "no handler ran" and trust the HTML at hydration instead of resolving every anchor's URL at claim. Without a handler the HTML and the hydration ids are byte-for-byte what they were.
+
 ## 2.0.0-rc.14
 
 ### Patch Changes

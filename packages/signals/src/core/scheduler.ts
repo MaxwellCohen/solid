@@ -1,11 +1,16 @@
 import {
+  CONFIG_SLOT_NODE,
+  CONFIG_AHEAD,
+  CONFIG_FRAME,
   CONFIG_HELD,
+  CONFIG_HELD_FRAME,
   CONFIG_IN_SNAPSHOT_SCOPE,
   CONFIG_GUESS,
   CONFIG_INPUTS_PUBLISHED,
   CONFIG_OVERRIDE,
   CONFIG_REDERIVE,
   CONFIG_STAGED,
+  CONFIG_STAGED_ERROR,
   CONFIG_VERDICT,
   EFFECT_RENDER,
   EFFECT_TRACKED,
@@ -24,15 +29,216 @@ import {
   REACTIVE_ZOMBIE,
   STATUS_ERROR,
   STATUS_PENDING,
-  STATUS_UNINITIALIZED
+  STATUS_UNINITIALIZED,
+  CONFIG_ASYNC,
+  REACTIVE_JOINED,
+  REACTIVE_STAGED_READ
 } from "./constants.js";
 import { attrHooks } from "./attribution-hooks.js";
-import { ext, markUnflushedStaged, recompute, resyncUnflushedCompanions } from "./core.js";
-import { DEV, emitDiagnostic, GRAPH_SIZE_WARN_AT, noteFanOut, reportDiagnostic } from "./dev.js";
+import { notifyStatus } from "./async.js";
+import {
+  dispatchingEvent,
+  ext,
+  isSame,
+  markUnflushedStaged,
+  recompute,
+  resyncUnflushedCompanions
+} from "./core.js";
+import {
+  DEV,
+  emitDiagnostic,
+  GRAPH_SIZE_WARN_AT,
+  locationLines,
+  noteFanOut,
+  reportDiagnostic,
+  type DiagnosticSubject
+} from "./dev.js";
 import { sweepDormant, trimStaleDeps } from "./graph.js";
 import { deleteFromHeap, enqueueSub, runHeap, type Heap } from "./heap.js";
 import { devCheckQuiescent } from "./invariants.js";
+import { rethrowCleanupError } from "./owner.js";
 import type { Computed, Owner, Signal } from "./types.js";
+
+// Optional-module hooks: module bindings, not `GlobalQueue` statics, so a
+// bundle that never imports the installing module never assigns them — its
+// minifier folds every guarded call site (and the branch behind it) away.
+// Each module installs its own set at evaluation (pay-for-use).
+//
+// Lanes (lanes.ts; installed when `createOptimistic` — or verdict.ts — is
+// imported; every call site is behind a bit or a `passLane` nothing else sets).
+export let laneReadHook:
+  | ((c: Computed<any> | null, el: Signal<any> | Computed<any>) => unknown)
+  | null = null;
+export let laneStageHook:
+  | ((
+      el: Computed<any>,
+      l: Transaction,
+      create: boolean,
+      errored: boolean | Computed<any>
+    ) => boolean)
+  | null = null;
+export let laneOutcomeHook:
+  | ((el: Computed<any>, value: unknown, errored: boolean) => boolean)
+  | null = null;
+export let laneWriteHook: (<T>(el: Signal<T> | Computed<T>, v: T) => T) | null = null;
+export let applyGuessesHook: ((parent: Transaction | null) => void) | null = null;
+export let laneSeamsHook: ((t: Transaction | null) => void) | null = null;
+export let laneCorrectionsHook: (() => boolean) | null = null;
+export let endLanesHook: ((u: Transaction) => void) | null = null;
+export let lanesBlockedHook: ((t: Transaction) => boolean) | null = null;
+/** R5 (lanes.ts `laneSeams` parks a frame flight): the landing's re-derive
+ * of a reader adopts the flight instead (true: adopted, nothing to queue). */
+export let laneAdoptHook: ((r: Computed<any>) => boolean) | null = null;
+/** core.ts `frameRead` served lane work or a verdict reader a held node's
+ * committed value (lanes.ts `laneServed`). */
+export let laneServedHook: ((c: Computed<any>, el: Signal<any> | Computed<any>) => void) | null =
+  null;
+/** A guess was written (guesses.ts `optimisticWrite`): the arms only a guess
+ * reaches (CONFIG_GUESS) — a build without `createOptimistic` or
+ * `createOptimisticStore` never sets it, and its bundler folds them. */
+export let guessing = false;
+export function armGuessing(): void {
+  guessing = true;
+}
+export function installLaneHooks(
+  read: NonNullable<typeof laneReadHook>,
+  stage: NonNullable<typeof laneStageHook>,
+  write: NonNullable<typeof laneWriteHook>,
+  seams: NonNullable<typeof laneSeamsHook>,
+  end: NonNullable<typeof endLanesHook>,
+  blocked: NonNullable<typeof lanesBlockedHook>,
+  adopt: NonNullable<typeof laneAdoptHook>,
+  served: NonNullable<typeof laneServedHook>
+): void {
+  laneReadHook = read;
+  laneStageHook = stage;
+  laneWriteHook = write;
+  laneSeamsHook = seams;
+  endLanesHook = end;
+  lanesBlockedHook = blocked;
+  laneAdoptHook = adopt;
+  laneServedHook = served;
+}
+// The guess layer (guesses.ts; installed when `createOptimistic` or
+// `createOptimisticStore` is imported): a written guess's own pass judged
+// (`laneOutcome`, core.ts `recompute`), the seam's guesses opening their
+// lanes (`applyGuessesAt`), the body-end corrections (`laneCorrections`).
+// Null without it: every site tolerates it.
+export function installGuessHooks(
+  outcome: NonNullable<typeof laneOutcomeHook>,
+  applyGuesses: NonNullable<typeof applyGuessesHook>,
+  corrections: NonNullable<typeof laneCorrectionsHook>
+): void {
+  laneOutcomeHook = outcome;
+  applyGuessesHook = applyGuesses;
+  laneCorrectionsHook = corrections;
+}
+// Boundaries (boundaries.ts): the display consumers between an observer
+// and the root. `catch` — status from a frame reader, nearest boundary
+// first (true: caught, the root never hears of it; a clear — flags 0 —
+// settles the reader there); `fresh` — a pass that read a hold (true: a
+// first pass a loading boundary that has not shown content caught,
+// `joinPass`; `held`: the flush's hold owns it, nothing catches it);
+// `hidden` — a frame reader behind a fallback (the boundary showing it)
+// is not on screen and holds nothing; `boundarySeam` — the seam's sweep (readers
+// gone or settled without a pass reveal; an `on` re-arm resolves);
+// `heldRun` — a queued run under a fallback-showing boundary waits for
+// the reveal (true: held; the boundary re-queues it by type). The
+// synchronous first render on creation builds the subtree, attached or
+// not; its updates and the user effects wait.
+export let catchHook: ((node: Computed<any>, flags: number, error: unknown) => unknown) | null =
+  null;
+export let freshHook: ((node: Computed<any>, held?: unknown) => unknown) | null = null;
+export let hiddenHook: ((r: Computed<any>) => unknown) | null = null;
+export let boundarySeamHook: (() => void) | null = null;
+export let heldRunHook: ((node: Computed<any>) => boolean) | null = null;
+export function installBoundaryHooks(
+  caught: NonNullable<typeof catchHook>,
+  fresh: NonNullable<typeof freshHook>,
+  hidden: NonNullable<typeof hiddenHook>,
+  seam: NonNullable<typeof boundarySeamHook>,
+  heldRun: NonNullable<typeof heldRunHook>
+): void {
+  catchHook = caught;
+  freshHook = fresh;
+  hiddenHook = hidden;
+  boundarySeamHook = seam;
+  heldRunHook = heldRun;
+}
+/** Store (store/store.ts): `park` — the flush parked into `t`: the store
+ * materializes and holds the container node of every staging that had none
+ * (a staging needs the node as its home only when something can read the
+ * frame through it; a hold can); `commit` — fold the pending backings whose
+ * container nodes this flush committed (the owned-raw model's one mutation
+ * point). */
+export let storeParkHook: ((t: Transaction) => void) | null = null;
+export let storeCommitHook: (() => void) | null = null;
+export function installStoreHooks(
+  park: NonNullable<typeof storeParkHook>,
+  commit: NonNullable<typeof storeCommitHook>
+): void {
+  storeParkHook = park;
+  storeCommitHook = commit;
+}
+/** `affects()` marks (affects.ts): the releases at a landing and at the seam
+ * (ambient marks). */
+export let releaseMarksHook: ((nodes: Signal<any>[]) => void) | null = null;
+export let releaseAmbientMarksHook: ((parked: Transaction | null) => void) | null = null;
+export function installMarkHooks(
+  release: NonNullable<typeof releaseMarksHook>,
+  releaseAmbient: NonNullable<typeof releaseAmbientMarksHook>
+): void {
+  releaseMarksHook = release;
+  releaseAmbientMarksHook = releaseAmbient;
+}
+/** Verdicts (verdict.ts). */
+export let observeFlightHook: ((c: Computed<any>, el: Computed<any>) => boolean) | null = null;
+/** D-25's hold work (verdict.ts `holdWork`): on `source` going pending,
+ * whether verdict reader `n` waits on it instead of re-deriving. */
+export let holdWorkHook: ((n: Computed<any>, source: Computed<any>) => unknown) | null = null;
+/** D-41's staged-error mark (verdict.ts `stageMark`): the settle walk's
+ * reached node `n` carries staged error source `el`'s staging. */
+export let stageMarkHook: ((n: Computed<any>, el: Computed<any>) => void) | null = null;
+/** #4417 (verdict.ts `keepReaders`); a landing's held re-derivation run (verdict.ts `attachWaits`). */
+export let keepReadersHook: ((el: Computed<any>) => void) | null = null;
+export let attachHook: ((node: Computed<any>) => boolean) | null = null;
+/** #4544 (verdict.ts). Null without the verdict engine. */
+export let holdStagingHook:
+  | ((c: Computed<any>, el?: Signal<any> | Computed<any>) => unknown)
+  | null = null;
+/** A pass that asks leaves the display for the hold it read (F-2's producer
+ * clause; verdict.ts `askerJoins`). */
+export let askerJoinsHook:
+  | ((c: Computed<any>, el: Signal<any> | Computed<any>, t: Transaction | null) => void)
+  | null = null;
+export function installVerdictHooks(
+  observeFlight: NonNullable<typeof observeFlightHook>,
+  holdWork: NonNullable<typeof holdWorkHook>,
+  stageMark: NonNullable<typeof stageMarkHook>,
+  keepReaders: NonNullable<typeof keepReadersHook>,
+  attach: NonNullable<typeof attachHook>,
+  holdStaging: NonNullable<typeof holdStagingHook>,
+  askerJoins: NonNullable<typeof askerJoinsHook>
+): void {
+  observeFlightHook = observeFlight;
+  holdWorkHook = holdWork;
+  stageMarkHook = stageMark;
+  keepReadersHook = keepReaders;
+  attachHook = attach;
+  holdStagingHook = holdStaging;
+  askerJoinsHook = askerJoins;
+}
+/** External-source bridge (wired by enableExternalSource(); undefined while
+ * no config is active — including after _resetExternalSourceConfig()). */
+export let wireExternalSourceHook: ((self: Computed<any>) => void) | undefined = undefined;
+export let externalUntrackHook: (<T>(fn: () => T) => T) | undefined = undefined;
+export function setExternalHooks(
+  wire: typeof wireExternalSourceHook,
+  untrack: typeof externalUntrackHook
+): void {
+  wireExternalSourceHook = wire;
+  externalUntrackHook = untrack;
+}
 
 // CARVE 3: transactions (Transition objects, the ambient batch, holds/parks,
 // stashed effect queues, async reporters, actions, zombies, entanglement,
@@ -72,7 +278,8 @@ import type { Computed, Owner, Signal } from "./types.js";
 
 export interface Transaction {
   /** Held staged nodes: committed at the landing. For a lane: its guesses
-   * and its work (their lane values in `_x._lane`), revealed at the seam. */
+   * and its work (their values its staging, `_pendingValue`), revealed at
+   * the seam. */
   _nodes: Signal<any>[];
   /** Stashed effect queues (render, user): run ahead of the landing flush's. */
   _queues: [QueueCallback[], QueueCallback[]];
@@ -111,13 +318,39 @@ export interface Transaction {
    * leaf reading a held lane that has not shown is a stale reader of it
    * (#3460); one reading a lane the seam has not judged yet is its work. */
   _held: boolean;
+  /** Lane: a current truth that differs folded beneath one of its keyed
+   * guesses (lanes.ts `laneWrite`, D-34) — the store's reader of it: a
+   * deriving pass outside the lane, or `latest()` (`c` null), is served
+   * the hold's world from its guesses; NOT_PENDING otherwise
+   * (store/optimistic.ts `foldedRead`). Unset until then; not
+   * `_`-prefixed: a new mangled name shifts every later one
+   * (scripts/mangle-props.mjs), which costs the floors bytes for a path
+   * only optimistic stores reach. */
+  folded?: (c: Computed<any> | null, el: Signal<any> | Computed<any>) => unknown;
+  /** Opened by a `latest()` read of an unheld flight (verdict.ts
+   * `pendingVerdict`): it holds nothing of that flight, and a probe in it is
+   * its verdict lane's with no re-run at its landing (F-6, D-23). Unset
+   * until then; not `_`-prefixed, as `folded`. */
+  latest?: 1;
+  /** Lane: the transaction whose question's answer a keyed guess of it was
+   * re-based over (store/optimistic.ts `_laneRebase`, #4525): in that
+   * transaction's flush the lane's work reads its staging (core.ts
+   * `frameRead`, #4536). Unset until then; not `_`-prefixed, as `folded`. */
+  over?: Transaction;
   /** `affects()` marks declared in it (affects.ts): released at the landing.
    * Not nodes — a mark holds nothing (`blocked` never sees one). */
   _marks: Signal<any>[] | null;
+  /** On a lane: the flights of it a frame's own passes asked (F-2, S-57)
+   * — a pass the frame dirtied that ran as the lane's and went pending.
+   * The frame (`over`) holds on them and reveals with the lane (lanes.ts
+   * `lanesBlocked`). */
+  waits?: Computed<any>[];
+  /** How many of `_nodes` lanes.ts `collectMounts` has looked at (S-58). */
+  scanned?: number;
 }
 /** Live transactions — opened, unmerged, not landed. Scanned at every seam
  * while non-empty; nothing on the plain path. */
-const transactions: Transaction[] = [];
+export const transactions: Transaction[] = [];
 /** Observe tier: this flush parked its transaction (`holdStart` fired). */
 let holding = false;
 /** A transaction (listed here) or a lane (lanes.ts lists its own). */
@@ -206,6 +439,8 @@ export function resolveTx(t: Transaction): Transaction {
  * went pending with nothing held). Joining a second one merges it into the
  * flush's: the work that touched both entangles them (A15). */
 export function joinFuture(t: Transaction | null): void {
+  // A lane is never the flush's transaction (D-37, #4440).
+  if (laneStageHook && t?._lane) return;
   const f = flushTransaction;
   if (f === null) {
     flushTransaction = t === null ? newTransaction(false) : resolveTx(t);
@@ -255,10 +490,7 @@ export function blocked(t: Transaction): boolean {
   judge ??= t;
   // An action still running in it holds it open (action.ts). Its lanes
   // (lanes.ts): a lane under `t` blocks it while blocked itself.
-  const r =
-    t._open !== 0 ||
-    blockedBy(t._nodes, t) ||
-    (!!GlobalQueue._lanesBlocked && GlobalQueue._lanesBlocked(t));
+  const r = t._open !== 0 || blockedBy(t._nodes, t) || !!lanesBlockedHook?.(t);
   judge = prev;
   return r;
 }
@@ -315,7 +547,15 @@ function blockedBy(nodes: Signal<any>[], owner: Transaction, own = false): boole
     // The frame's own pending observer (off screen: this one holds nothing;
     // the next listed node may).
     if ((n as any)._type === EFFECT_RENDER) {
-      if (onScreen(n, judge ?? owner)) return true;
+      // #4544 (F-6): a frame born into the hold that is pending on what a
+      // settled verdict reader's display-ahead value asked for (`read`,
+      // CONFIG_AHEAD) does not hold it; the reader re-derives at the
+      // landing, and the frame with it. A lane's reveal still waits (S-29).
+      if (
+        !(observeFlightHook && n._config & CONFIG_AHEAD && !owner._lane) &&
+        onScreen(n, judge ?? owner)
+      )
+        return true;
       continue;
     }
     for (let s = n._subs; s !== null; s = s._nextSub) {
@@ -332,7 +572,9 @@ function blockedBy(nodes: Signal<any>[], owner: Transaction, own = false): boole
       // shows nothing — a mount the frame has not revealed — and holds
       // nothing.
       if (
-        (((r as any)._type === EFFECT_RENDER && r._statusFlags & STATUS_PENDING) ||
+        (((r as any)._type === EFFECT_RENDER &&
+          r._statusFlags & STATUS_PENDING &&
+          !(observeFlightHook && r._config & CONFIG_AHEAD && !owner._lane)) ||
           r._flags & REACTIVE_FRAME_READ ||
           (r._config & CONFIG_REDERIVE && r._statusFlags === STATUS_PENDING)) &&
         (s._gen === r._depGen || r._x?._error != null) &&
@@ -353,10 +595,7 @@ function blockedBy(nodes: Signal<any>[], owner: Transaction, own = false): boole
  * everything under it, so a reader there is not on screen and holds
  * nothing — boundaries.ts). */
 function onScreen(r: Computed<any>, t: Transaction): boolean {
-  return (
-    !(r._flags & REACTIVE_ZOMBIE && removalStagedBy(r, t)) &&
-    !(GlobalQueue._hidden && GlobalQueue._hidden(r))
-  );
+  return !(r._flags & REACTIVE_ZOMBIE && removalStagedBy(r, t)) && !hiddenHook?.(r);
 }
 /** A15 (#3463): a reader whose removal is staged — a zombie, parked by a
  * pass awaiting its commit — is still on screen and live for every hold,
@@ -366,13 +605,10 @@ function onScreen(r: Computed<any>, t: Transaction): boolean {
  * the nearest non-zombie ancestor. */
 function removalStagedBy(r: Computed<any>, t: Transaction): boolean {
   let o: Owner | null = r;
-  while (o !== null && (o as any)._flags & REACTIVE_ZOMBIE) o = o._parent;
-  return (
-    o !== null &&
-    (o._config & CONFIG_HELD) !== 0 &&
+  while ((o as any)?._flags & REACTIVE_ZOMBIE) o = o!._parent;
+  return ((o?._config as number) & CONFIG_HELD &&
     (o as any)._x?._transaction != null &&
-    txOf(o as any) === resolveTx(t)
-  );
+    txOf(o as any) === resolveTx(t)) as boolean;
 }
 /** Unchanged passes this flush whose stale dependency tail awaits the
  * flush's verdict (A30, #3469): trimmed when the flush commits, kept when
@@ -428,10 +664,32 @@ export function list(n: Signal<any>, t: Transaction): void {
 function holdFrame(owner: Owner, t: Transaction): void {
   for (let c = owner._firstChild; c !== null; c = c._nextSibling) {
     if ((c as Computed<any>)._x?._transaction?._lane) continue;
-    if ((c as Computed<any>)._fn !== undefined && !(c._config & CONFIG_HELD))
-      holdNode(c as unknown as Signal<any>, t);
+    if ((c as Computed<any>)._fn !== undefined) {
+      if (!(c._config & CONFIG_HELD)) holdNode(c as unknown as Signal<any>, t);
+      c._config |= CONFIG_HELD_FRAME;
+    }
     holdFrame(c, t);
   }
+}
+
+/** The nodes under `owner` a transaction other than `t` holds (boundaries.ts:
+ * what an earlier hold staged under a re-armed boundary). */
+export function heldUnder(
+  owner: Owner,
+  t: Transaction | null,
+  fn: (n: Computed<any>) => void
+): void {
+  for (let c = owner._firstChild; c !== null; c = c._nextSibling) {
+    if ((c._config & (CONFIG_HELD | CONFIG_OVERRIDE)) === CONFIG_HELD && txOf(c as any) !== t)
+      fn(c as Computed<any>);
+    heldUnder(c, t, fn);
+  }
+}
+
+/** `n` leaves the hold it was staged in: its next pass publishes mainline. */
+export function unhold(n: Signal<any>): void {
+  n._x!._transaction = null;
+  n._config &= ~CONFIG_HELD;
 }
 
 export const dirtyQueue: Heap = {
@@ -445,6 +703,12 @@ export let clock = 0;
 let scheduled = false;
 let halted = false;
 let haltNotified = false;
+// Dev: where the halt happened (the owner path and source lines of its
+// diagnostic), repeated on the "Update ignored" notice so a frozen interaction
+// points back at the computation that threw (#4178).
+let haltedAt = "";
+// Dev: the computation the halt in progress is located at (haltReactivityAt).
+let haltSubject: DiagnosticSubject | undefined;
 let syncDepth = 0;
 let inTrackedQueueCallback = false;
 
@@ -513,9 +777,19 @@ export function nextQuestion(): number {
 export const MAINLINE_QUESTION = 0x7fffffff;
 
 export let inEffectCallback = false;
+/** Dev-only: matches no event, so a window or phase holding it applies
+ * whatever event is current (see `strictReadEvent`, core.ts). */
+export const ANY_EVENT = {};
+/** Dev-only: the DOM event current when the effect phase was entered. A
+ * handler dispatched synchronously from that phase (`el.focus()`) runs under
+ * a different event and is not in it (#4235). */
+export let effectCallbackEvent: unknown = ANY_EVENT;
 
-export function setEffectCallback(value: boolean) {
-  if (__DEV__) inEffectCallback = value;
+export function setEffectCallback(value: boolean, event: unknown = ANY_EVENT) {
+  if (__DEV__) {
+    inEffectCallback = value;
+    effectCallbackEvent = event;
+  }
 }
 
 export type QueueCallback = (type: number) => void;
@@ -546,19 +820,32 @@ export function schedule() {
  */
 export const ROOT_ERROR_HOOK: unique symbol = Symbol.for("solid-js/root-error-hook") as any;
 
+const HALTED = "[REACTIVITY_HALTED]";
+
 export function haltReactivity(cause?: unknown): void {
   if (halted) return;
   halted = true;
-  let message = "[REACTIVITY_HALTED]";
+  // A cleanup error collected before the halt is dropped (owner.ts).
+  rethrowCleanupError(true);
+  let message = HALTED;
   if (__DEV__) {
     message +=
       " An uncaught error halted the reactive system. No further updates will be processed. Handle errors with <Errored> or treat this as a crash.";
-    emitDiagnostic({
-      code: "REACTIVITY_HALTED",
-      kind: "error",
-      severity: "error",
-      message
-    });
+    // Located at the computation the error escaped from when the call site
+    // named it (haltReactivityAt), so the console says where it happened
+    // (`in <App> › <Composer>`), not only that it did (#4178). Otherwise the
+    // ambient owner, as every other diagnostic.
+    const entry = emitDiagnostic(
+      {
+        code: "REACTIVITY_HALTED",
+        kind: "error",
+        severity: "error",
+        message
+      },
+      haltSubject
+    );
+    haltedAt = locationLines(entry);
+    message += haltedAt;
   }
   // Surface the cause here too: callers rethrow it, but a creation-time throw
   // unwinds through ancestor recomputes that convert it to status instead of
@@ -574,14 +861,27 @@ export function haltReactivity(cause?: unknown): void {
   report && report(cause);
 }
 
+/**
+ * Dev: `haltReactivity`, located at `subject` — the computation the uncaught
+ * error escaped from — for the REACTIVITY_HALTED message's owner path. Call
+ * sites pick it in dev builds only (`haltReactivity(e)` in production), so
+ * production keeps the one-argument halt and its bytes unchanged.
+ */
+export function haltReactivityAt(cause: unknown, subject: DiagnosticSubject): void {
+  haltSubject = subject;
+  haltReactivity(cause);
+  haltSubject = undefined;
+}
+
 // Logs on the first write after a halt so a frozen interaction is traceable.
 function notifyHalted(): void {
   if (haltNotified) return;
   haltNotified = true;
   console.error(
     __DEV__
-      ? "[REACTIVITY_HALTED] Update ignored: the reactive system was halted by an earlier uncaught error."
-      : "[REACTIVITY_HALTED]"
+      ? "[REACTIVITY_HALTED] Update ignored: the reactive system was halted by an earlier uncaught error." +
+          haltedAt
+      : HALTED
   );
 }
 
@@ -589,6 +889,7 @@ function notifyHalted(): void {
 export function resetErrorHalt(): void {
   halted = false;
   haltNotified = false;
+  if (__DEV__) haltedAt = "";
 }
 
 // CARVE 4: the queue tree (boundary CollectionQueues as children of the
@@ -608,35 +909,19 @@ export class GlobalQueue implements IQueue {
   declare static _update: (el: Computed<unknown>) => void;
   declare static _dispose: (el: Computed<unknown>, self: boolean, zombie?: boolean) => void;
   declare static _runEffect: (el: Computed<unknown>) => void;
-  // External-source bridge (wired by enableExternalSource(); null while no
-  // config is active — including after _resetExternalSourceConfig()).
-  declare static _wireExternalSource: ((self: Computed<any>) => void) | undefined;
-  declare static _externalUntrack: (<T>(fn: () => T) => T) | undefined;
-  // Lanes (lanes.ts; installed when `createOptimistic` — or verdict.ts — is
-  // imported; null otherwise, and every call site is behind a bit or a
-  // `passLane` that nothing else sets).
-  declare static _laneRead:
-    | ((c: Computed<any> | null, el: Signal<any> | Computed<any>) => unknown)
-    | undefined;
-  declare static _laneStage:
-    | ((
-        el: Computed<any>,
-        l: Transaction,
-        create: boolean,
-        errored: boolean | Computed<any>
-      ) => boolean)
-    | undefined;
-  declare static _laneOutcome:
-    | ((el: Computed<any>, value: unknown, errored: boolean) => boolean)
-    | undefined;
-  declare static _laneWrite: (<T>(el: Signal<T> | Computed<T>, v: T) => T) | undefined;
-  declare static _applyGuesses: ((parent: Transaction | null) => void) | undefined;
   /** A slot node's truth is in flight (its family's derive — store/store.ts). */
   declare static _slotFlight: ((n: Signal<any>) => boolean) | undefined;
-  /** The value a slot node's guess covered: its committed value — a chained
-   * link's refreshed from the inner store, whose commits it never learned
-   * while the guess served the reads (store/store.ts, §7b). */
-  declare static _slotCovered: ((n: Signal<any>) => unknown) | undefined;
+  /** A write to a slot node's guess (lanes.ts `laneWrite`): true when the
+   * store made the slot its derive's lane's derivation (optimistic.ts);
+   * `back`: the slot's node now, for a guess that comes back (lanes.ts
+   * `endLanes`). */
+  declare static _slotTake: ((n: Signal<any>, back?: boolean) => any) | undefined;
+  /** A lane dirtied a store's guess carrier: the readers of the leaves of
+   * the keys it changed re-derive as the lane's work (optimistic.ts). */
+  declare static _slotDirty: ((n: Signal<any>, l: Transaction) => void) | undefined;
+  /** A lane re-derives a store's guess carrier's readers at `t`'s landing
+   * (lanes `rerun`): the readers of the leaves of the keys it changed. */
+  declare static _slotRerun: ((n: Signal<any>, t: Transaction) => void) | undefined;
   /** The store's row judgment for a guessed slot (optimistic.ts): the truth
    * is the guess's echo when reconcile would write nothing into it. */
   declare static _echoes: ((guess: unknown, truth: unknown) => boolean) | undefined;
@@ -651,51 +936,23 @@ export class GlobalQueue implements IQueue {
   declare static _storeWrappable: ((v: unknown) => boolean) | undefined;
   declare static _mark: ((node: Signal<any> | Computed<any>) => void) | undefined;
   declare static _witnessMark: (() => void) | undefined;
-  /** An older question's truth was held beneath a guess (lanes.ts
-   * `laneWrite`): the store re-bases an arrangement guess over it
-   * (store/optimistic.ts). */
-  declare static _laneRebase: ((el: Signal<any>, truth: unknown) => void) | undefined;
-  declare static _laneSeams: ((leaks: Computed<any>[] | null) => void) | undefined;
-  declare static _laneCorrections: (() => boolean) | undefined;
-  declare static _endLanes: ((u: Transaction) => void) | undefined;
-  declare static _lanesBlocked: ((t: Transaction) => boolean) | undefined;
+  /** A truth landing on a guess (lanes.ts `laneWrite`), `older` when it
+   * answers an older question: the store re-bases an arrangement guess over
+   * it; a current one differing from a shown keyed arrangement guess folds
+   * beneath it instead of voiding it (D-34) — true: the lane stages it
+   * beneath (store/optimistic.ts). */
+  declare static _laneRebase:
+    | ((el: Signal<any>, truth: unknown, older: boolean) => boolean | void)
+    | undefined;
+  // Lanes (lanes.ts).
   declare static _verdictLane: ((t: Transaction) => Transaction) | undefined;
-  // Verdicts (verdict.ts).
-  declare static _observeFlight: ((c: Computed<any>, el: Computed<any>) => boolean) | undefined;
   // Observe tier (attribution.ts): the guesses of `t`'s lanes (lanes.ts).
   declare static _laneGuesses: ((t: Transaction) => Signal<any>[]) | undefined;
-  /** Store (store/store.ts): fold the pending backings whose container
-   * nodes this flush committed — the owned-raw model's one mutation point. */
-  declare static _storeCommit: (() => void) | undefined;
-  /** The flush parked into `t`: the store materializes and holds the
-   * container node of every staging that had none (store/store.ts — a
-   * staging needs the node as its home only when something can read the
-   * frame through it; a hold can). */
-  declare static _storePark: ((t: Transaction) => void) | undefined;
-  // `affects()` marks (affects.ts): the probe's coverage test, the releases
-  // at a landing and at the seam (ambient marks).
+  /** `createDeferred` (deferred.ts): a deferred node with a flight up that
+   * `c` derives from, if any — a truth reader waits on it. */
+  declare static _lagging: ((c: Computed<any>) => Computed<any> | undefined) | undefined;
+  // `affects()` marks (affects.ts): the probe's coverage test.
   declare static _marked: ((el: Signal<any> | Computed<any>) => boolean) | undefined;
-  declare static _releaseMarks: ((nodes: Signal<any>[]) => void) | undefined;
-  declare static _releaseAmbientMarks: ((parked: Transaction | null) => void) | undefined;
-  // Boundaries (boundaries.ts): the display consumers between an observer
-  // and the root. `_catch` — status from a frame reader, nearest boundary
-  // first (true: caught, the root never hears of it; a clear — flags 0 —
-  // settles the reader there); `_fresh` — a pass that read a hold (true: a
-  // first pass a loading boundary that has not shown content caught,
-  // `joinPass`); `_hidden` — a frame reader behind a fallback is not on
-  // screen and holds nothing; `_boundarySeam` — the seam's sweep (readers
-  // gone or settled without a pass reveal; an `on` re-arm resolves).
-  declare static _catch:
-    | ((node: Computed<any>, flags: number, error: unknown) => boolean)
-    | undefined;
-  declare static _fresh: ((node: Computed<any>) => unknown) | undefined;
-  declare static _hidden: ((r: Computed<any>) => boolean) | undefined;
-  declare static _boundarySeam: (() => void) | undefined;
-  // `_heldRun` — a queued run under a fallback-showing boundary waits for
-  // the reveal (true: held; the boundary re-queues it by type). The
-  // synchronous first render on creation builds the subtree, attached or
-  // not; its updates and the user effects wait.
-  declare static _heldRun: ((node: Computed<any>) => boolean) | undefined;
 
   flush() {
     if (this._running) return;
@@ -747,15 +1004,15 @@ export class GlobalQueue implements IQueue {
     // Lanes: an ended action body judges its guesses now that their passes
     // have run (lanes.ts); a correction's re-derivations run in one more
     // pure round — the parent's flights before the parent is judged below.
-    if (GlobalQueue._laneCorrections?.()) runHeap(dirtyQueue, GlobalQueue._update);
+    if (laneCorrectionsHook?.()) runHeap(dirtyQueue, GlobalQueue._update);
     const joined = flushTransaction;
     flushTransaction = null;
     // The frame's verdict is in: the guesses written since the last seam
-    // open their lane under the frame's transaction (a lane's own flush
-    // parents a nested lane to it), or are dropped — the frame commits, and
-    // there is nothing to be optimistic over. Their passes run next round;
+    // open their lane under the frame's transaction, or are dropped — the
+    // frame commits, and there is nothing to be optimistic over. (A lane is
+    // never the flush's transaction, D-37: lanes do not nest.) Their passes run next round;
     // a parent landing at this very seam ends the lane before they do.
-    GlobalQueue._applyGuesses?.(joined);
+    applyGuessesHook?.(joined);
     // A lane's own flush (its flight landing, its reveal) parks nothing: the
     // lane's work reached it per pass; the frame's plain writes commit.
     // (Resolved: a guess over another transaction's guess merged them.)
@@ -795,10 +1052,16 @@ export class GlobalQueue implements IQueue {
           if (
             n._pendingValue !== NOT_PENDING &&
             !((n as Computed<any>)._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED)) &&
-            n._equals &&
-            n._equals(n._value, n._pendingValue) &&
             n._x?._pendingFirstChild == null &&
-            n._x?._pendingDisposal == null
+            n._x?._pendingDisposal == null &&
+            // A recovery to the last good value is a change of answer
+            // (D-41): the error it replaces stays the display until it
+            // commits, so it is held, not netted.
+            !n._x?._shownError &&
+            // The comparator last: a pass that created children (an object
+            // owning a fresh async memo, #4111) must not have it read them.
+            // A NotReady read there is a change (`isSame`).
+            isSame(n, n._value, n._pendingValue)
           ) {
             n._pendingValue = NOT_PENDING;
             n._config &= ~CONFIG_STAGED;
@@ -812,7 +1075,7 @@ export class GlobalQueue implements IQueue {
         if (n._config & CONFIG_STAGED) holdFrame(n as unknown as Owner, t);
       }
       pendingNodes.length = 0;
-      GlobalQueue._storePark?.(t);
+      storeParkHook?.(t);
 
       // (This flush's runs are stashed with `t` below — after the landings,
       // so a `t` that lands at this very seam runs them first, ahead of
@@ -823,13 +1086,17 @@ export class GlobalQueue implements IQueue {
       // through like the same read outside): it re-runs now, as the
       // holder's verdict lane's work — before the lane seams, which reveal
       // it (nothing commits this seam that could dispose it).
-      const zombies = deferredZombies.splice(0).sort((a, b) => a._height - b._height);
-      for (let i = 0; i < zombies.length; i++)
-        if (
-          (zombies[i]._flags & (REACTIVE_DISPOSED | REACTIVE_ZOMBIE)) === REACTIVE_ZOMBIE &&
-          zombies[i]._config & CONFIG_VERDICT
-        )
-          recompute(zombies[i]);
+      // (Verdict readers exist only with the verdict engine installed.)
+      const zombies = deferredZombies.splice(0);
+      if (observeFlightHook) {
+        zombies.sort((a, b) => a._height - b._height);
+        for (let i = 0; i < zombies.length; i++)
+          if (
+            (zombies[i]._flags & (REACTIVE_DISPOSED | REACTIVE_ZOMBIE)) === REACTIVE_ZOMBIE &&
+            zombies[i]._config & CONFIG_VERDICT
+          )
+            recompute(zombies[i]);
+      }
       // The unchanged passes' tails stay linked (A30, #3469): their inputs
       // are held, and the committed frame still derives from them — no trim.
     } else {
@@ -856,18 +1123,21 @@ export class GlobalQueue implements IQueue {
     // This flush's own runs, the lanes' reveals, and the landings' held runs
     // are collected apart and ordered below.
     const own = this._queues;
-    const lanes: [QueueCallback[], QueueCallback[]] = (this._queues = [[], []]);
+    let lanes: [QueueCallback[], QueueCallback[]] | null = null;
     // The passes that read this frame's stagings as the screen read held
     // writes if it parked: the lane seam re-derives them on the committed
     // world (a lane's runs wait this round).
-    GlobalQueue._laneSeams?.(t !== null ? stagedReaders : null);
-    if (stagedReaders.length) stagedReaders.length = 0;
+    if (laneSeamsHook) {
+      this._queues = lanes = [[], []];
+      laneSeamsHook(t);
+      if (stagedReaders.length) stagedReaders.length = 0;
+    }
     this._queues = [[], []];
     for (let k = transactions.length - 1; k >= 0; k--) {
       const u = transactions[k];
       if (blocked(u)) continue;
       transactions.splice(k, 1);
-      GlobalQueue._endLanes?.(u);
+      endLanesHook?.(u);
       land(u);
       // A landing's commits can dispose a zombie a transaction judged above
       // was blocked on (#3463: live "until the commit that disposes it") —
@@ -876,13 +1146,13 @@ export class GlobalQueue implements IQueue {
     }
     // The store folds the pending backings whose container nodes committed
     // — this flush's, or a landing's (store/store.ts installs it).
-    GlobalQueue._storeCommit?.();
+    storeCommitHook?.();
     // Marks declared outside a transaction: the flush that carried them
     // parked (something async below) — the window is the frame's, the marks
     // are its transaction's; else they release at the seam, verdict-only,
     // nothing to show (affects.ts).
     const live = t && liveTx(t);
-    GlobalQueue._releaseAmbientMarks?.(live);
+    releaseAmbientMarksHook?.(live);
     // The effect phase: lane work first (displayed ahead of the frame), then
     // this flush's runs, then the runs the landings held from earlier
     // flushes — as one pass would have queued them (#3540: a shell
@@ -906,8 +1176,8 @@ export class GlobalQueue implements IQueue {
       // same array, not a copy; `run` takes it whole). Every other seam
       // builds the ordered queue above.
       this._queues[i] =
-        parked || lanes[i].length || this._queues[i].length
-          ? lanes[i].concat(parked ? [] : own[i], this._queues[i])
+        parked || lanes?.[i].length || this._queues[i].length
+          ? (lanes ? lanes[i] : []).concat(parked ? [] : own[i], this._queues[i])
           : own[i];
     }
     if (deferredZombies.length !== 0) {
@@ -920,7 +1190,7 @@ export class GlobalQueue implements IQueue {
     }
     // Boundaries: readers that settled, landed or died this flush are
     // dropped; a fallback with none left reveals next round.
-    GlobalQueue._boundarySeam?.();
+    boundarySeamHook?.();
   }
   run(type: number) {
     const effects = this._queues[type - 1];
@@ -933,8 +1203,9 @@ export class GlobalQueue implements IQueue {
     // Lane work's runs are the lane's: they run at its reveal, not with
     // the frame (which may park). A lane pass that read the frame's own
     // staging is the frame's (`recompute` passes null): its run waits with
-    // the frame.
-    if (type) (lane !== null ? lane : this)._queues[type - 1].push(fn);
+    // the frame. So is a run given a transaction that is not a lane (a
+    // first run born held, `effect()`).
+    if (type) (lane?._lane ? lane : this)._queues[type - 1].push(fn);
     schedule();
   }
   /** Status reaching the root: pending is absorbed (the root mount defers —
@@ -952,7 +1223,7 @@ export class GlobalQueue implements IQueue {
    * first: a fallback catches what is not ready under it, and the root
    * never hears of it. */
   notify(node: Computed<any>, mask: number, flags: number, error?: any): boolean {
-    if (GlobalQueue._catch && GlobalQueue._catch(node, flags & mask, error)) return true;
+    if (catchHook?.(node, flags & mask, error)) return true;
     if (mask & STATUS_PENDING) {
       if (flags & STATUS_PENDING) {
         if (__DEV__ && _enforceLoadingBoundary) _hitUnhandledAsync = true;
@@ -986,26 +1257,61 @@ export class GlobalQueue implements IQueue {
  * or without the held read) owes nothing. A run this transaction stashed
  * for it is void (#3322: an effect has one value slot, and the stale pass
  * overwrote the value that run was for) — the re-derivation's run replaces
- * it. */
-export function reruns(u: Transaction): void {
+ * it. Truthy when an effect re-derives (`land`). */
+export function reruns(u: Transaction): unknown {
+  let frame;
   for (let i = 0; i < u._reruns.length; i++) {
     const r = u._reruns[i];
     // An errored reader's display is its error (D-39): the landing gives it
     // nothing to re-derive, and a re-run would be a read that retries the
-    // errored source (#3945).
-    if (r._flags & REACTIVE_DISPOSED || r._statusFlags & STATUS_ERROR) continue;
-    if (r._flags & REACTIVE_FRAME_READ || r._config & CONFIG_VERDICT) {
-      r._flags &= ~REACTIVE_FRAME_READ;
+    // errored source (#3945) — unless that source is errored no longer: the
+    // reader was served a shown error the landing replaces (`throwShown`).
+    // Nor is the reader's own error: its pass threw over the committed value
+    // of what the landing carries, served as the screen (A10; a lane's node
+    // reading its parent's hold, or a pass with no value yet reading a
+    // staging, `stagedScreen`) — the landing is the new answer, and the
+    // reader re-derives on it (A15; D-39). A first load read so has no other
+    // run: its error would stay the screen (async-gen 91501 #1158, #119).
+    // A boundary's structure (its tree, its output: CONFIG_FRAME, no effect
+    // type) re-derives all the same: what it read as the screen is the
+    // content the landing replaces, and only its pass links the new content
+    // whose recovery must reach it (D-3, D-39, #4405).
+    const s = (r._x?._error as any)?.source;
+    if (
+      r._flags & REACTIVE_DISPOSED ||
+      (r._statusFlags & STATUS_ERROR &&
+        ((r as any)._type || !(r._config & CONFIG_FRAME)) &&
+        s !== r &&
+        (s?._statusFlags ?? STATUS_ERROR) & STATUS_ERROR)
+    )
+      continue;
+    if (r._flags & REACTIVE_FRAME_READ || (observeFlightHook && r._config & CONFIG_VERDICT)) {
+      // A memo re-deriving its own error holds the release as an effect
+      // does (`land`): run first, the held runs showed that error beside a
+      // frame about to replace it (#4407; #4284: the grouping never changes
+      // the screen). So does a memo the landing holds (CONFIG_HELD: its
+      // staged value is in this frame): the held runs read it, so shown
+      // first they showed the stale pass the re-derivation replaces — one
+      // frame reveals the change (F-1, A15; #4648).
+      frame ||= (r as any)._type || s === r || r._config & CONFIG_HELD;
+      // A lane's reveal leaves the mark to the transaction: a reader that
+      // also read a held node as committed (`staleReader`) still observes
+      // that flight until it re-runs — cleared here, the transaction landed
+      // at this seam with the flight up and voided the reveal's run (#4397).
+      if (!u._lane) r._flags &= ~REACTIVE_FRAME_READ;
       (r as any)._modified = false;
       // Its frame is replaced by the re-derivation: a run one of its
       // children queued this flush (re-run by the same landing) is for the
       // frame being replaced — void too (#3404).
       for (let c = r._firstChild; c !== null; c = c._nextSibling)
         if ((c as any)._type) (c as any)._modified = false;
-      enqueueSub(r);
+      // A frame flight the seam parked (lanes.ts `laneSeams`, R5) asked the
+      // question this landing would: adopted, it is asked once (F-9).
+      if (!laneAdoptHook?.(r)) enqueueSub(r);
     }
   }
   u._reruns.length = 0;
+  return frame;
 }
 
 /** The landing: the held frame becomes the frame. */
@@ -1013,8 +1319,8 @@ function land(u: Transaction): void {
   // Attribution hook: judged complete — its held writes commit next
   // (`_nodes` still lists them).
   if (__OBSERVE__ && attrHooks !== null) attrHooks.transitionSettled(u);
-  reruns(u);
-  if (u._marks !== null) GlobalQueue._releaseMarks!(u._marks);
+  const frame = reruns(u);
+  if (releaseMarksHook && u._marks !== null) releaseMarksHook(u._marks);
   // Old children die in the commits (cleanups first), then the stashed
   // effects run ahead of this flush's own. A node a lane took over since
   // (a guess written over the staged truth) is the lane's to land.
@@ -1024,7 +1330,20 @@ function land(u: Transaction): void {
     n._x!._transaction = null;
     commitPendingNode(n);
   }
-  releaseQueues(u);
+  // A cleanup those commits ran that wrote a node `u` still held joined
+  // `u`, which has left `transactions`: the write is this landing's, and
+  // the next flush must not park in it (#4089).
+  if (flushTransaction === u) flushTransaction = null;
+  // An effect re-derives next round (`reruns`): the held runs wait for it
+  // (D-9, the A15 reveal corollary, #4071). Its re-derivation can discover a
+  // flight — a stale reader whose mainline pass stopped reading it, now
+  // reading the landed world — and a landing that showed its runs first
+  // would reveal the held write beside a frame that can only show its old
+  // value. Queued last in this effect phase, the release hands them to the
+  // next round's own runs, ahead of the re-derivation's: they show with it,
+  // or park with it in the hold its pending opens. The commits stand.
+  if (frame) globalQueue._queues[1].push(() => releaseQueues(u));
+  else releaseQueues(u);
 }
 
 /** The held runs join this flush's effect phase after its own runs (the
@@ -1044,7 +1363,8 @@ function append<T>(a: T[], b: T[]): void {
 }
 
 /** Nodes staged this flush (`_pendingValue` set), committed at its end. */
-const pendingNodes: Signal<any>[] = [];
+export const pendingNodes: Signal<any>[] = [];
+
 /** Passes that read a staging of this flush as the screen — lane work
  * (core.ts `stagedRead`), a verdict reader before the frame's verdict
  * (verdict.ts): if the frame parks they read a held write — re-derived next
@@ -1117,23 +1437,96 @@ export function insertSubs(node: Signal<any> | Computed<any>): void {
   if (__OBSERVE__ && fanOut >= GRAPH_SIZE_WARN_AT) noteFanOut(node, fanOut);
 }
 
-/** Lane work re-staged (lanes.ts; `recompute`): the lane's members among
- * its subscribers re-derive as the lane's work (REACTIVE_LANE_DIRTY), their
- * runs held with it — not as stale readers republishing the committed view
- * (#3460). After `insertSubs`. A render effect on no lane is marked too:
- * inert for its pass (`recompute` seats a lane only from its own `_x`), it
- * is a live write if the effect becomes a zombie later this flush — an
+/** Lane work re-staged (lanes.ts; `recompute`): the node's subscribers are
+ * notified (`insertSubs`), and the lane's members among them re-derive as
+ * the lane's work (REACTIVE_LANE_DIRTY), their runs held with it — not as
+ * stale readers republishing the committed view (#3460). `l` is a lane, so
+ * it has a parent. A render effect on no lane is marked too: inert for its
+ * pass (`recompute` seats a lane only from its own `_x`), it is a live
+ * write if the effect becomes a zombie later this flush — an
  * on-screen reader whose removal an adopted write stages follows the lane
- * (the lane-membership ruling, 2026-10-05; `_update`). */
+ * (the lane-membership ruling, 2026-10-05; `_update`).
+ *
+ * A render effect re-run by a verdict memo's change (`createMemo(() =>
+ * latest(x))`, CONFIG_VERDICT) is the verdict reader the same read inline
+ * makes it, for that pass (F-6; D-26 `[s(), L()]`, #4284): a frame reader
+ * of its other reads — a staging's screen, a flight's committed value. One
+ * an earlier propagation this flush seated in another lane leaves that
+ * seat: its pass starts from the frame's, as the inline effect's does, and
+ * `laneRead` re-derives it on the screen if that lane holds (`entered`). */
 export function laneDirty(node: Signal<any> | Computed<any>, l: Transaction): void {
+  insertSubs(node);
+  // A store's guess carrier: the readers of the keys it changed read their
+  // leaves — dirtied as the lane's work too (store/optimistic.ts).
+  if (node._config & CONFIG_SLOT_NODE) GlobalQueue._slotDirty?.(node as Signal<any>, l);
+  const display = l._parent!._verdict === l;
   for (let s = node._subs; s !== null; s = s._nextSub) {
-    const t = s._sub._x?._transaction;
-    if (t?._lane ? sameLane(t, l) : (s._sub as any)._type) s._sub._flags |= REACTIVE_LANE_DIRTY;
+    const c = s._sub;
+    // F-2's producer clause: a reader that asks (CONFIG_ASYNC) and is the
+    // frame's — held, or joined this flush — asked of the truth already; a
+    // verdict lane's re-derivation of what it read is display work with
+    // the same value beneath, and re-runs it only to ask again (S-51).
+    if (
+      display &&
+      c._config & CONFIG_ASYNC &&
+      (c._config & CONFIG_HELD || c._flags & (REACTIVE_JOINED | REACTIVE_STAGED_READ)) &&
+      !c._x?._transaction?._lane
+    ) {
+      deleteFromHeap(c, dirtyQueue);
+      continue;
+    }
+    let t = c._x?._transaction;
+    // A reader a hold has pending on its re-ask (a correction's
+    // re-derivation waiting on a refresh) re-derives from the guess as the
+    // lane's work, seated there before its pass: lane work reads the
+    // hold's flight as the screen (D-26, D-37), whether it reads the
+    // flight before the guess or after (D-28), and whether it reads the
+    // guess itself or a derivation of it — this walk runs at every lane
+    // node's change. Seated at the guess read, the earlier read threw the
+    // pass back into the hold (#4629). The hold is the lane's parent's (the
+    // same slot, D-33), or any hold whose flights the reader waits on are all
+    // `refresh()` re-asks (`_reask`; with none, its own flight): a re-ask
+    // asks no new question and holds nothing new (D-34 ¶3), so a guess into
+    // another log shows beside it at once (F-11, #4666). A reader pending on
+    // another hold's new question stays with that hold (#4577: seated, it
+    // would ask its question over the screen's input). One seated in another
+    // lane this flush moves; its pass reads that lane's guess and links the
+    // two (`enterLane`, A15), and `dissolveLane` skips a node it lost.
+    if (
+      t &&
+      !(c as any)._type &&
+      (c._config & (CONFIG_HELD | CONFIG_OVERRIDE)) === CONFIG_HELD &&
+      (c._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED)) === STATUS_PENDING &&
+      (resolveTx(t) === resolveTx(l._parent!) ||
+        [...(c._x!._pendingSources ?? [c])].every(p => p._x!._reask))
+    )
+      list(c, (t = l));
+    if ((c as any)._type === EFFECT_RENDER && node._config & CONFIG_VERDICT)
+      ((c._config |= CONFIG_VERDICT), (c._flags &= ~REACTIVE_LANE_DIRTY));
+    if (t?._lane ? sameLane(t, l) : (c as any)._type) c._flags |= REACTIVE_LANE_DIRTY;
   }
 }
+
+/** An effect owes a run: marked, and its bound runner queued in its phase. */
+export function queueEffectRun(node: any): void {
+  node._modified = true;
+  globalQueue.enqueue(
+    node._type,
+    (node._boundRunEffect ??= GlobalQueue._runEffect.bind(null, node))
+  );
+}
+
 /** One lane, or two of one link group (#3335): one reveal unit. */
 export function sameLane(a: Transaction, b: Transaction): boolean {
   return a === b || (a._links !== null && a._links === b._links);
+}
+
+/** A staged value becomes the node's value: truthy when one was staged. */
+export function applyStaged(n: Signal<any>): unknown {
+  return (
+    n._pendingValue !== NOT_PENDING &&
+    ((n._value = n._pendingValue), (n._pendingValue = NOT_PENDING))
+  );
 }
 
 export function commitPendingNode(n: Signal<any>): void {
@@ -1145,22 +1538,36 @@ export function commitPendingNode(n: Signal<any>): void {
   // commits a value.
   if (!c._fn) {
     n._config &= ~(CONFIG_STAGED | CONFIG_HELD);
-    if (n._pendingValue !== NOT_PENDING) {
-      n._value = n._pendingValue as any;
-      n._pendingValue = NOT_PENDING;
-    }
+    applyStaged(n);
     return;
   }
   // Computeds only from here (`_statusFlags` is not a signal field). A
   // commit beneath a flight publishes its inputs (A15 reveal corollary,
   // #3305): a reveal of it must observe, not show the pre-flight value.
   const inFlight = n._pendingValue === NOT_PENDING && (c._statusFlags! & STATUS_PENDING) !== 0;
+  const err = n._config & CONFIG_STAGED_ERROR;
+  // An answer commits: the error it replaces leaves the display (D-41).
+  if (!inFlight && c._x) c._x._shownError = null;
   n._config = inFlight
-    ? (n._config & ~CONFIG_HELD) | CONFIG_INPUTS_PUBLISHED
-    : n._config & ~(CONFIG_HELD | CONFIG_STAGED | CONFIG_INPUTS_PUBLISHED);
-  if (n._pendingValue !== NOT_PENDING) {
-    n._value = n._pendingValue as any;
+    ? (n._config & ~(CONFIG_HELD | CONFIG_HELD_FRAME)) | CONFIG_INPUTS_PUBLISHED
+    : n._config &
+      ~(
+        CONFIG_HELD |
+        CONFIG_HELD_FRAME |
+        CONFIG_STAGED |
+        CONFIG_INPUTS_PUBLISHED |
+        CONFIG_STAGED_ERROR
+      );
+  // D-41: the staged answer is an error — published now, when a value would
+  // show, through the ordinary error path (`stageError`). Its readers first
+  // see it in the cycle after this seam: a tracked re-read there is not a
+  // retry (`read`), or a boundary re-derived by it would retry it forever.
+  if (err) {
+    const e = n._pendingValue;
     n._pendingValue = NOT_PENDING;
+    n._time = clock + 1;
+    notifyStatus(c as Computed<unknown>, STATUS_ERROR, e);
+  } else if (applyStaged(n)) {
     // A node born staged (recompute) initializes at this commit.
     c._statusFlags! &= ~STATUS_UNINITIALIZED;
     // A quiet re-ask's classification survives its landing and dies with
@@ -1170,13 +1577,7 @@ export function commitPendingNode(n: Signal<any>): void {
     if (c._x != null) ((c._x._reask = false), (c._x._flushed = NOT_PENDING));
     // An effect with a staged value was born held (L2): its first run is
     // this commit's, not its creation's (A29) — queue it now.
-    if ((n as any)._type && (n as any)._type !== EFFECT_TRACKED) {
-      (n as any)._modified = true;
-      globalQueue.enqueue(
-        (n as any)._type,
-        ((n as any)._boundRunEffect ??= GlobalQueue._runEffect.bind(null, c as Computed<unknown>))
-      );
-    }
+    if ((n as any)._type && (n as any)._type !== EFFECT_TRACKED) queueEffectRun(n);
   }
   // The committed value is the first observable answer for a loading-window
   // node — the window closes here, not at compute time (#2990). Unconditional
@@ -1307,6 +1708,7 @@ export function flush<T>(fn?: () => T): T | void {
   if (__OBSERVE__ && attrHooks !== null && scheduled) attrHooks.flushStart();
   while (scheduled) {
     if (__DEV__ && ++count === 1e5) {
+      rethrowCleanupError(true);
       // Attribution beats a bare guard (#3140): say what kept the loop alive.
       throw new Error(
         `Potential Infinite Loop Detected. Kept alive by scheduled work${
@@ -1322,8 +1724,27 @@ export function flush<T>(fn?: () => T): T | void {
   // so this is the "committed and effects ran" instant for everything the
   // loop processed.
   if (__OBSERVE__ && drained && attrHooks !== null) attrHooks.flushEnd();
+  // A cleanup that threw during the drain, now that the drain is complete
+  // (owner.ts).
+  rethrowCleanupError();
 }
 
+/** Dev-only: the DOM event current when the running effect queue started,
+ * or `ANY_EVENT` outside one. Read once per queue rather than once per
+ * effect (the getter is costly under jsdom); no event starts or ends between
+ * two effects of one synchronous queue (#4235). */
+export let queueEvent: unknown = ANY_EVENT;
+
 function runQueue(queue: QueueCallback[], type: number): void {
+  if (__DEV__) {
+    const prev = queueEvent;
+    queueEvent = dispatchingEvent();
+    try {
+      for (let i = 0; i < queue.length; i++) queue[i](type);
+    } finally {
+      queueEvent = prev;
+    }
+    return;
+  }
   for (let i = 0; i < queue.length; i++) queue[i](type);
 }

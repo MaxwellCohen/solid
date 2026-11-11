@@ -1,5 +1,386 @@
 # solid-js
 
+## 2.0.0-rc.21
+
+### Patch Changes
+
+- 46ab2dd: Dev diagnostic `CAUGHT_REACTIVE_READ` (D-42 / S-47): warns once per computation when a reactive read's throw — `NotReadyError` or the source's error — was caught inside the computation's body and the pass completed with a value. An `async` computation is judged when its flight settles (a rejection is the throw continuing; a landed value is the catch). The runtime's own catches (boundaries, `isPending`, `watch`, comparator/cleanup/effect-callback routing, solid-js's hydration trace) never warn. Dev-only; no production bytes.
+- 61bb177: `createOwner` leaves solid-js's public types: it is typed only through `solid-js/internal`, like the boundary primitives behind `Errored`, `Loading` and `Reveal` (#3709). It stays a runtime export for the renderers. Solid 1.x had no `createOwner`, and application code that used it in an RC should host a scope with `createRoot()` (its `dispose` argument can be passed around as a plain function) and re-enter one with `runWithOwner()`. A detached `owner.dispose` keeps throwing, since it is a method and not part of the public API (#4444).
+- 25fb7be: fix(hydration): a content-input write made before a rejected fragment's chunks arrive recovers the hydrated `<Errored>` fallback (#4588)
+- 0d4c5e0: Hot reload: a PascalCase helper function that the refresh transform wraps now gets every argument when it is called directly, not only the first (#4513).
+- 84353de: A non-keyed `<Show>`'s or `<Match>`'s narrowed accessor read inside an `isPending()` thunk no longer throws the stale-value error for a branch that mounted in the flush its condition landed in, so the thunk's later reads link and the verdict flips (#4648). The exemption holds only inside a verdict window (`isPending` / `latest`): a plain read of the accessor while its branch's opening is held still throws, rather than hand out the committed falsy.
+- 99d9821: A stream cut short no longer hangs hydration when the client runtime starts after the parser finished (#2958). The truncation sweep only armed when `hydrate()` ran while `document.readyState` was still `"loading"`. An entry that ran later, such as one waiting on a route module that arrives after `DOMContentLoaded`, or a deferred module entry, left every unsettled `_fr` declaration pending, so its `<Loading>` kept the fallback and hydration never ended. When the document carries the in-render bootstrap (`<HydrationScript />`, which declares `_$HY.s`), a runtime that boots after parsing now runs the same sweep at boot: the records that can no longer settle leave the registry, the cut fragments are rejected, and a macrotask later the refs a keyed consumer already took are rejected. Documents with a host-placed bootstrap (`generateHydrationScript()`) are unchanged.
+- Updated dependencies [f509fe3]
+- Updated dependencies [46ab2dd]
+- Updated dependencies [9379257]
+- Updated dependencies [f17cd09]
+- Updated dependencies [65da5de]
+- Updated dependencies [689347f]
+- Updated dependencies [20c115c]
+- Updated dependencies [5315127]
+- Updated dependencies [ecf3011]
+- Updated dependencies [bb7f9b5]
+- Updated dependencies [64fedc7]
+- Updated dependencies [e49b0c7]
+- Updated dependencies [6af149e]
+- Updated dependencies [19e0951]
+- Updated dependencies [dd5f9d1]
+- Updated dependencies [ecf3011]
+- Updated dependencies [39f951b]
+- Updated dependencies [3a73a36]
+- Updated dependencies [ceb7896]
+- Updated dependencies [4235019]
+- Updated dependencies [a56b10b]
+- Updated dependencies [b773146]
+- Updated dependencies [343f007]
+- Updated dependencies [ab3e844]
+- Updated dependencies [87f3446]
+- Updated dependencies [62745f6]
+- Updated dependencies [4a4803c]
+- Updated dependencies [6ec1613]
+- Updated dependencies [d9aa8f7]
+- Updated dependencies [60d6307]
+- Updated dependencies [7135a77]
+- Updated dependencies [592a43b]
+- Updated dependencies [2ba429b]
+- Updated dependencies [c8d6fd2]
+- Updated dependencies [64625bc]
+- Updated dependencies [2ba10bd]
+- Updated dependencies [8cac5f0]
+- Updated dependencies [42924f4]
+- Updated dependencies [9c4e4a8]
+- Updated dependencies [edd3c44]
+- Updated dependencies [77be406]
+- Updated dependencies [061b013]
+- Updated dependencies [d9a97d0]
+- Updated dependencies [6e569c7]
+- Updated dependencies [f53d927]
+- Updated dependencies [97e1826]
+- Updated dependencies [eed4469]
+- Updated dependencies [71a6a75]
+- Updated dependencies [2abf27d]
+- Updated dependencies [b5077ea]
+- Updated dependencies [5315127]
+- Updated dependencies [4f9768f]
+- Updated dependencies [227a01d]
+- Updated dependencies [5f07d04]
+- Updated dependencies [ecf3011]
+- Updated dependencies [885b99b]
+- Updated dependencies [ab5b5cb]
+- Updated dependencies [9034647]
+- Updated dependencies [efd7f7d]
+- Updated dependencies [25b94f0]
+- Updated dependencies [e704cfc]
+- Updated dependencies [e56a4a0]
+- Updated dependencies [e56a4a0]
+- Updated dependencies [8a8e950]
+- Updated dependencies [74126b1]
+- Updated dependencies [2c9a1e3]
+- Updated dependencies [718ec9c]
+- Updated dependencies [643a7a7]
+- Updated dependencies [fda83a3]
+- Updated dependencies [84353de]
+- Updated dependencies [f0471e8]
+- Updated dependencies [66c6f56]
+- Updated dependencies [749b0d7]
+- Updated dependencies [404d06a]
+- Updated dependencies [50dec1b]
+- Updated dependencies [456e6d5]
+- Updated dependencies [e44f824]
+- Updated dependencies [d5cf231]
+- Updated dependencies [ecf3011]
+- Updated dependencies [7ea8706]
+- Updated dependencies [aeca8da]
+- Updated dependencies [ef0aadd]
+- Updated dependencies [d0fc285]
+- Updated dependencies [62bf4c4]
+- Updated dependencies [f8080f3]
+- Updated dependencies [663ecb0]
+- Updated dependencies [2e05808]
+- Updated dependencies [1445197]
+- Updated dependencies [ab3d2ad]
+- Updated dependencies [131ceb8]
+  - @solidjs/signals@2.0.0-rc.21
+
+## 2.0.0-rc.20
+
+### Patch Changes
+
+- 178605c: `isPending` of a derived store's key no longer reads `true` for one pass at the store's first landing. A first answer is loading, not pending, as it is for the memo the store copies. Before, a `<Show when={isPending(...)}>` over such a key could open for that pass and mount content that was never meant to show.
+- 17ec571: A derived store whose derive reads an async memo through `latest()` no longer shows its seed for one pass after it first resolves: a memo (or a second derived store) reading it now sees what the derive wrote, so a render effect downstream commits only the real value, the same as one reading the store directly (#4355).
+- 178605c: A render effect reading a derived store that errored, then recovered through `latest()` into a new flight, now re-runs when that flight lands. Before, it never re-ran: an `Errored` around it went back to its content with the value missing, or a `Loading` around it stayed on its fallback.
+- df2ba6c: The dev "multiple instances of Solid" warning now fires when two copies actually meet (a component or `useContext()` from one copy runs inside a component rendered by another, with no owner) instead of whenever a second copy loads. Isolated copies, such as a devtools panel rendering into its own root or a Solid 1 copy on the same page, no longer warn (#2549). Solid 2 no longer sets v1's `globalThis.Solid$$` flag.
+- c7f4403: A hydrated `<Errored>` showing the server's fallback no longer logs `Hydration key miss` (or builds detached elements) for content it creates lazily: children behind a context provider, a component returning a function, a `children()` accessor, or a nested `<Loading>`, `<Errored>`, `<Show>` or `<For>` resolved after the content's own run. Nothing under the boundary claims server DOM, so the fallback stays up until a content input changes or `reset()` (#4348). A nested `<Loading>` there no longer waits on a fragment the server dropped with the content.
+- ffe0c1c: Dev: warn `LOADING_ON_ACCESSOR` when a Loading boundary's `on` receives a function (`on={route}` or `on={() => route()}`). The boundary never calls it, so it never re-arms; pass the value, `on={route()}`. Dev builds only.
+- bd95616: A hydrating client never asks again for an async memo the server answered with an error, when a boundary that resumes mid-stream reads it only through another memo (#4375). The resume created a reader (`isPending(m1)` of a memo `m1` over the rejected `m0`) on a later flush round than the one the rejection landed in, so the read retried the errored memo (PJ-R35); `m0` sat in the shell, outside the boundary being claimed, and hydration took the retry for a client write and ran its compute — a real request, with nothing changed. A served rejection now re-serves in a claim window's own round, as it already does in the round a served answer lands in; a write still recomputes it.
+- 38e0c49: `<For>` / `mapArray` over a shallow store diffs the store's backing array instead of reading every slot through the proxy. A one-row write on a 1,000-row shallow store spent ~1.3 ms in per-slot trap reads; the list's diff now costs what it does over a plain array (~0.05 ms). Optimistic shallow stores, accessor slots and reads inside a setter keep the per-slot path.
+- 1f558e5: Non-keyed Show's narrowed accessor no longer throws a stale-value error when an on-screen branch re-runs during a hold that is closing it: the guard reads the condition as the reading binding sees it (the screen), as Match already does
+- 56a982c: The first draft write to a plain store array clones it with `slice()` instead of copying one property descriptor per element. A push into a 10,000-row store drops from ~10.7 ms to ~0.15 ms per write. Arrays with accessors, named keys or a non-Array prototype keep the descriptor copy.
+- 5d57e12: A `<Loading>` whose fragment was cut off by a truncated stream renders fresh on the client and adopts the records the server sent. The records the stream never settled were still in the registry at that point, so the fresh render adopted their promises, which never settle: the boundary stayed on its fallback and its reads never ran. Truncation now removes those records before any boundary resumes. Reads the server never answered compute on the client, and the values and errors it sent before the cut are still adopted.
+- Updated dependencies [c9d1eeb]
+- Updated dependencies [178605c]
+- Updated dependencies [17ec571]
+- Updated dependencies [178605c]
+- Updated dependencies [957f065]
+- Updated dependencies [3b7ea81]
+- Updated dependencies [2861ab8]
+- Updated dependencies [0f5b150]
+- Updated dependencies [e82efb0]
+- Updated dependencies [2ba8a02]
+- Updated dependencies [910abc1]
+- Updated dependencies [cddc7c3]
+- Updated dependencies [81a12d8]
+- Updated dependencies [81a12d8]
+- Updated dependencies [5f22701]
+- Updated dependencies [81a12d8]
+- Updated dependencies [9baaba3]
+- Updated dependencies [ffe0c1c]
+- Updated dependencies [b68942c]
+- Updated dependencies [7cacef2]
+- Updated dependencies [ac28157]
+- Updated dependencies [1e115b8]
+- Updated dependencies [6b7e34a]
+- Updated dependencies [822fa01]
+- Updated dependencies [2c63f41]
+- Updated dependencies [5f60713]
+- Updated dependencies [425a713]
+- Updated dependencies [38e0c49]
+- Updated dependencies [56a982c]
+- Updated dependencies [1b32ff2]
+- Updated dependencies [4d8195d]
+- Updated dependencies [7ebd4a3]
+- Updated dependencies [f94dcd5]
+- Updated dependencies [409f893]
+- Updated dependencies [85ad399]
+  - @solidjs/signals@2.0.0-rc.20
+
+## 2.0.0-rc.19
+
+### Patch Changes
+
+- 2a0da2f: fix(web): refuse an async memo that resolves to an element (#4242)
+
+  On the server, an async memo (or async iterable source) whose value is rendered output — JSX, a component's result, a `<Loading>`/`<Errored>` boundary — can no longer reach the hydration serializer. A boundary's output failed in seroval, so its record never resolved and the hydrating client waited on the memo forever (streamed, the boundary reverted to its fallback); a template object crossed as data, duplicating the markup, and streamed the client could not insert it (`UNRECOGNIZED_INSERT_VALUE`). The memo now rejects where its value lands, with the new diagnostic `ASYNC_MEMO_ELEMENT` (recorded on the observe channel; the dev message says what to do instead, other tiers carry the code), and its boundary contains the error like any render error: the nearest `<Errored>` renders its fallback and the client hydrates it; with none, the `<Loading>` fragment rejects and the client renders the subtree. Return data from the async memo and render the JSX from it. Ordinary data is never refused (only plain objects in the SSR template shape, boundary outputs and fragment arrays holding them count as rendered output), and content that never hydrates (`<NoHydration>`) is untouched.
+
+  Also, a fragment failing while a boundary registered under an undefined key (one created inside an async memo's continuation) is pending no longer fails the whole request in `renderToStream`.
+
+- 0090fe3: Fix: a streamed `<Loading>` claimed after a client write changed a shell memo it reads now shows the client's value. A hydrated memo adopted while its server answer was still streaming had no snapshot, so once a client write took its compute over, the boundary's claim read the client's value while adopting the server's markup — and kept the server's text (or attribute) for good, since nothing re-ran the binding. The memo's server answer is now its snapshot when it lands, even when the write already superseded it: the claim reads what the markup shows and replays the client's value at its release, as for a written signal. If the client's recompute is still in flight when the boundary resumes, the claim is served the snapshot instead of going pending, so the boundary keeps the server's content (no fallback over it, no detached nodes, no lost queued click) until the client's value lands.
+- ee94440: Hydration keeps a client-only boundary's served fallback (#4286). A `<Loading>` whose content reads a bare `ssrSource: "client"` source is served as its fallback plus the `"$$f"` marker; the client hydrated that fallback, then resumed by re-running the boundary, and when the content suspended on the question it now asks, the new boundary built a second fallback and dropped the served one (losing focus, selection or a running animation in it). The `"$$f"` route now creates the loading boundary once, at hydration: its content waits on the resume and its fallback hydrates the served one (built at the boundary's id, as the server built it), so content that suspends after the resume keeps the hydrated fallback until it can show.
+- f5cf675: An `<Errored>` around a `<Loading>` whose async read fails during a streamed render now shows its fallback in the server HTML outside server components too, and the client adopts it. Before, the boundary's HTML was empty until hydration (neither the loading nor the error fallback), and the hydrating client rendered the failed boundary from scratch: it asked again and showed the loading fallback. Now, when the `<Loading>` is all of the `<Errored>`'s content, the server draws the error fallback in its place (in the shell, or in the streamed fragment after the shell) and serializes the error at the `<Errored>`, so a client that hydrates after the failure arrived claims that markup and adopts its data without asking again, and recovers when the content's inputs change, as for any hydrated failure (#4273). A client that hydrated before the failure arrived renders it once, with nothing of the server's swap left beside it. With markup between the two boundaries the server still leaves the position blank and the client renders the failure (#4287).
+- 8f1d9d2: Server: when an `<Errored>` renders its fallback for a `<Loading>` that failed after the shell, and a hole in that fallback rejects while the server waits for it, the rejection now goes to the next boundary up, as it does when a fallback throws synchronously. Inside a pending outer `<Loading>`, that outer fragment fails; under an outer `<Errored>` whose whole content is that position, the outer fallback is drawn there and the client adopts it. Before, the region streamed blank and the hydrating client halted (#4316). A synchronous throw in that fallback no longer writes an error record for an outer `<Errored>` without sending its fallback.
+
+  The server's wait for that fallback now stops after the same pass budget as the `<Loading>` resume loop and then streams what it has. It also stops as soon as the render is torn down, for example when the request is aborted (#4317).
+
+- 8f1d9d2: An `<Errored>` whose fallback fails while rendering (a hole that rejects, or a synchronous throw) now passes that failure to the enclosing boundary on the server, in the shell as well as in a streamed fragment. An outer `<Errored>` draws its fallback in place of the region, and with none the request fails. Before, the region was sent blank, with the errors recorded and no markup for them.
+- 0856fee: An `<Errored>` boundary hydrated in the error state the server rendered now recovers. Before, hydration threw the server's error without running the content, so the boundary tracked nothing and stayed on the fallback until `reset()`, even after the failed content's inputs changed. Now the content runs during hydration, reading its server data without refetching but claiming no DOM, while the fallback claims the server's markup. If the content fails on the client, the boundary holds that client error and recovers when the content's inputs change. If the error only happened on the server, the server's fallback and error stay up until `reset()` is called or the content re-runs (#4273).
+- 542ff6f: An `<Errored>` whose fallback reads async data, around a `<Loading>` that fails after the shell, now streams its fallback once that data is ready, and a client hydrating after it arrived claims it. Before, the failure landed while the fallback's read was still pending, so the server had no markup for it. On its own, the boundary swapped to a blank and the client rendered the failure itself, asking for the failed read again. Inside an outer `<Loading>` still pending, the outer fragment arrived with the Errored region blank, and the client hydrated against the blank with warnings and showed nothing there. Now the failure waits for the fallback, as a swap to a fallback waits for the fallback to be ready: the loading placeholder stays until the finished fallback replaces it (carried by the outer fragment when that is still pending), and the error is serialized with it (#4306).
+- 2c9fdd9: A boundary whose server render failed is rendered fresh on the client while adopting the server's records. Inside that render, a `<Dynamic>` tag now creates its element instead of throwing a hydration mismatch, and a `<Portal>` mounts. Hydration also completes when the adopted error has no client boundary to catch it.
+- e0e4224: A client hydrating mid-stream no longer asks again for an async read whose server answer was an error, nor flashes back to the `<Loading>` fallback after the failure showed (#4287, #4306). The content of a hydrated failure (a hydrated `<Errored>`'s content run, or a rejected fragment's fresh render over the `<Errored>` fallback the server drew) reads a shell memo a cycle after its error landed, and a later tracked read retries an errored async node; the serialized-value latch took that rerun for a client write and computed. Inside such a content run the rerun now re-serves the server's answer and arms nothing. A rejected fragment with no outcome streams an empty template (it was a lone space), so the nodes its swap lists are the server's outcome alone.
+- e0e4224: A memo that adopted its server answer no longer asks again when the server's answer for one of its sources arrives mid-stream. Hydrated mid-stream, an async shell memo `b` reading another, `a`, re-ran when `a`'s server value landed, and the serialized-value latch took that rerun for a client write and computed `b`. The arrival of a served answer, with the flush that carries it, is now hydration's own pass (as a hydrated failure's content run is): a latched node re-running there re-serves its own answer and arms nothing. Only a client write makes it compute.
+- 1d6c40f: Add `onFlush(fn)`: runs `fn` once right after the pending flush, before paint, without waiting on async work. A write made there is its own update, so it is not held by async work another write in the same frame started (a menu closing while the consumer's `onSelect` navigates). Meant for event handlers and effect callbacks; dev warns (`ON_FLUSH_IN_OWNED_SCOPE`) in a component body or computation. Tree-shakes when unused.
+- 8f1d9d2: Server: a `<Loading>` that fails after the shell while its fragment waits inside an outer `<Loading>` that is still pending no longer arrives as a blank region reported as a success. The failure now goes to the nearest enclosing boundary, as it does when the same read fails inside the outer `<Loading>`'s own render. An `<Errored>` between them draws its fallback in the outer fragment, the client adopts it, and its error is serialized with it. With no `<Errored>` between them, the outer fragment fails, and an `<Errored>` whose whole content is that outer `<Loading>` draws its fallback there. This also covers an `<Errored>` fallback that fails in that position. Before, the client hydrated the blank region and either halted or rendered nothing there (#4316).
+- 6d6f03f: `<Repeat>` with element (non-function) children no longer builds each row twice. It read the `children` getter once to check for a function and again for the value, so every row's JSX ran twice and its refs fired twice (#4296).
+- e0e4224: A served answer's arrival during hydration no longer swallows a client write made in the same flush. Writes made before the arrival flush first, outside hydration's own pass, and a write made during it (an effect's, a later round of the flush) makes a node it reaches compute, so the node shows the written value instead of re-serving the server's answer. `@solidjs/signals` exports its internal flush-round counter (`clock`) for this.
+- 87934c1: Smaller bundles: builds without the optimistic-store, reveal-order or lane hook modules drop their dead branches, and the #4273/#4275 fixes share existing paths.
+- 2c9fdd9: Hydration never asks again for what the server sent, even when a streamed boundary's fragment rejects with no outcome (no `<Errored>` on the server could draw the failure). The client still renders that fragment fresh, so its graph is created, but every read in it now claims its serialized record: reads the server resolved take their values, and a read whose record is an error throws that error to the nearest client boundary, or is an uncaught error when there is none. Only reads with no record, such as those cut off by a truncated stream, compute. Recovery comes from a real input change or a boundary's `reset()`, as for any hydrated failure.
+- Updated dependencies [2a0da2f]
+- Updated dependencies [0847122]
+- Updated dependencies [0090fe3]
+- Updated dependencies [0dd40b2]
+- Updated dependencies [f811097]
+- Updated dependencies [8b34f22]
+- Updated dependencies [2d9c9aa]
+- Updated dependencies [c1009e5]
+- Updated dependencies [6ca7e8d]
+- Updated dependencies [3b6f839]
+- Updated dependencies [4ea2f49]
+- Updated dependencies [1d6c40f]
+- Updated dependencies [1212b77]
+- Updated dependencies [e509ad1]
+- Updated dependencies [253561e]
+- Updated dependencies [e0e4224]
+- Updated dependencies [7f03a4f]
+- Updated dependencies [c225400]
+- Updated dependencies [87934c1]
+  - @solidjs/signals@2.0.0-rc.19
+
+## 2.0.0-rc.18
+
+### Patch Changes
+
+- 50a810b: The DOM docs and cheatsheet narrow the ref-timing note: inside a ref, `el.ownerDocument.defaultView` is `null` only when the element's template contains no custom element; a template with one is imported into the live document as a whole.
+- f373683: Dev: an event handler fired synchronously from an effect callback (by `el.focus()`, `el.click()`, `dialog.showModal()`) no longer inherits the effect's strict-read window or effect-callback phase, so reading a prop in it no longer logs `STRICT_READ_UNTRACKED`, and creating a root in it no longer throws `PRIMITIVE_IN_EFFECT_CALLBACK`. Development builds only; production output is unchanged.
+- ec4483d: Live `For` rows whose markup kept its structure now travel as text and attribute edits that the client writes in place, instead of html it parses and morphs; any other change still ships the row whole. A dev server also ships a hash of each patched row's element tree, so a row the browser's parser restructured is reported and resynced instead of written. A live `<Repeat>`'s rows now take the same path; before, its hole was re-sent whole on every change.
+- 4645cff: Bump `seroval` and `seroval-plugins` to 1.7.0 (faster serialization: about 20–35% on hydration and JSON writes). A serialized write now ends at its first failing value, so later siblings in the same write are no longer sent after one fails; the keyed serializer settles that write instead of waiting for a `done` that seroval no longer sends. The JSON decoder's end-of-body open-stream count handles 1.7's single-consumer streams (from `ReadableStream` values).
+- aece1d4: `from(source)` turns a callback subscription (`(next, error, complete) => unsubscribe`), an Observable (`subscribe(observer)`, with `Symbol.observable` / `"@@observable"` interop) or an AsyncIterable into an AsyncIterable for a computation: `createMemo(() => from(source))`. A subscription keeps only the latest value, and a value emitted during `subscribe` lands with no loading frame; an AsyncIterable streams through. Errors reach the nearest error boundary. The source closes when the computation re-runs or its owner is disposed, without waiting for the replacement's first value, including a `for await` over `from` that starts before an async generator memo's first `await`: an internal supersede hook chains onto the node's iterator teardown slot (#3122). On the server, `from` streams like the client, and `ssrSource` decides how much of it the server consumes. Subscriptions and Observables carry the live-source brand, so the server serializes their first value and unsubscribes, and the hydrated client subscribes again. The server releases the source on `return()` or owner disposal.
+- Updated dependencies [c7f2d36]
+- Updated dependencies [0e668d8]
+- Updated dependencies [1c0ff9f]
+- Updated dependencies [f373683]
+- Updated dependencies [b9b6f33]
+- Updated dependencies [cdd9561]
+- Updated dependencies [a0520f6]
+- Updated dependencies [aece1d4]
+  - @solidjs/signals@2.0.0-rc.18
+
+## 2.0.0-rc.17
+
+### Patch Changes
+
+- db8241c: A cleanup (`onCleanup` or an effect's returned cleanup) that throws no longer aborts the rest of the teardown: every other cleanup in the tree still runs, and the first error is rethrown once the teardown is done. Outside a flush (a root's `dispose()`), the dispose call rethrows it. Inside a flush (a branch switch retiring a frame, a pass replacing an uncommitted one, an effect disposing a root), `flush()` rethrows it after the flush has finished, so commits and effects are never left half-applied, and lazy nodes released before the throw are still released. An `unobserved` hook that throws is handled the same way. If an uncaught error halts the reactive system, a collected cleanup error is dropped rather than surfacing later from an unrelated `dispose()`. On the server, `disposeOwner` runs every cleanup the same way, so `renderToStream`'s final dispose still reports the error (#4193).
+- 690228a: Clearer dev message for `ContextNotFoundError` (#4181). `undefined` still means "not provided" for context, but the message now names the context and says which case it hit: no provider and no default; a `createContext(undefined)` default, which is no default; or a provider that passed `undefined`, which counts as not provided. Each suggests `null` as the explicit empty value (`createContext<T | null>(null)`). Applies on the client and the server. Production messages and bundles are unchanged. The context docs and cheatsheet now say that `undefined` is "not provided" and that `null` is how to make a context optional.
+- a2a5b6f: The migration guide notes when a `from()` async generator's cleanup runs, the cheatsheet adds `createDeferred`, and the docs note that `SETTLED_CLEANUP_UNOWNED` throws in development (#4183).
+- 0771dc8: Docs: effects never compare compute values. The effect half (and the previous cleanup) runs every time the compute half re-runs, even when compute returned an equal value. To skip work on an unchanged value, read a `createMemo` (optionally with `equals`) in the compute. Noted in the `solid-2.0` skill and the cheatsheet (#4184).
+- d682022: Document how form inputs work with `value`/`checked` bindings: draft signals for editable fields, writing rejected input back in the handler (or `equals: false`), uncontrolled inputs, and spreads (#4185).
+- 6cca8b5: Dev builds now warn with `UNCOMMITTED_INPUT_OVERWRITTEN` (#4186) when a stateful DOM property binding (`value`/`checked` on an input, `value` on a textarea, `value`/`selected` on an option, `muted` on media) is about to re-write the value it wrote last time over an edit the user never committed to the bound signal — e.g. `value={props.name} onChange={commit}` with no draft signal, when another dynamic attribute in the same template changes. Runtime behavior is unchanged: the write still happens, once per element and property the warning names the fix (write the signal from `onInput`, use `defaultValue`/`defaultChecked` for an uncontrolled element, or write a rejected edit back with `e.currentTarget.value = next`).
+
+  Production output is unchanged byte for byte. In dev DOM output both compilers write stateful properties through a new `setStatefulProperty(el, name, value)` helper instead of the inline `el.name = value`; hydratable output keeps `setProperty`, and `spread`/`assign` check in the runtime. The check lives only in `@solidjs/web`'s dev build; the production entry carries a plain `node[name] = value` stub that no production-compiled module imports, so it tree-shakes away.
+
+  The "Form inputs" section of the DOM RFC, the cheatsheet and the solid-2.0 skill now say that a change to any other dynamic attribute in the same template re-runs a stateful binding, link the new code, and drop `equals: false` as a way to reject input (it is what the warning reports); write the accepted value back with `e.currentTarget.value = next` instead.
+
+- Updated dependencies [db8241c]
+- Updated dependencies [690228a]
+- Updated dependencies [3373ae1]
+- Updated dependencies [411f73b]
+- Updated dependencies [ee4963a]
+- Updated dependencies [2c442c4]
+- Updated dependencies [b2d9ed0]
+- Updated dependencies [f7f30b9]
+- Updated dependencies [a99550e]
+- Updated dependencies [6cca8b5]
+- Updated dependencies [0117658]
+  - @solidjs/signals@2.0.0-rc.17
+
+## 2.0.0-rc.16
+
+### Patch Changes
+
+- 3d8a8a9: Point JSDoc `@description` links at the 2.0 reference docs (v2.solidjs.com), document `isPending`, point the console footer, diagnostics guide and cheatsheet links at the `next` branch, and replace the stale `onMount` advice in the server-side client-only API error.
+- 1b81476: `CHEATSHEET.md` (and the `solid-2.0-cheatsheet` skill built from it) no longer recommends module-scope state for app-wide state (#4141). It now matches the `createContext` JSDoc and the 2.0 docs: create state in a Provider, which owns it per request on the server, and reserve module scope for constants.
+- b8617ec: `createDeferred(fn, options?)`: an async memo that may lag, but never leads. Before its first answer it is an ordinary async memo (readers suspend to `<Loading>`, or `loadingValue` shows). After it, a refetch holds nothing: readers keep the previous answer until the new one lands, the rest of the screen moves on, and `isPending` reports the refetch on the node and on everything derived from it, store keys included. A refetch that read a held value lands with that hold. A rejection errors like any memo. `refresh(d)` is a quiet re-ask, and `await refresh(d)` and `until` wait for the landing. It is `createMemo` on the server and hydrates like one.
+
+  The rules: F-1 and F-2 are amended for declared lag, and D-40 / S-41 are new. The `affects()` mark core moved to its own module (`affects-marks.ts`), which `createDeferred` shares. A mark on the source of a derived store now covers that store's keys.
+
+- 4a99c84: `createComponent(Comp, props, name?, loc?)` takes the JSX site the compiler emits beside the tag (`"src/App.tsx:12:5"`); the dev and observe component owner carries it on both the client and the server, so a finding raised inside a component reports `at src/App.tsx:12:5` (and `event.loc`) when nothing closer was located. The console footer is now two lines: the code's docs page for a human (`what it means and how to fix it: https://v2.solidjs.com/reference/solid-js/diagnostics/<slug>`), then the repair skill for an agent (installed path and GitHub URL, anchored to the code's section). `diagnostics.json` links each code to its docs page, and the `reactivity-diagnostics` skill documents the `at` line.
+- 0f64d82: `<Errored>` escapes its children on the server (#4116). A boundary's content never passes a compiled `escape` hole, so `<Loading>` escapes it itself; `<Errored>` did not, and a string child (or an array of strings, or a function returning one) was written into the HTML raw — user text inside an error boundary became live markup, and the client's text node mismatched on hydrate.
+- 467ac97: Hydration: a streamed `<Loading>` fragment that is the first to carry a `lazy()` module's assets now loads them before its resume claims the revealed content, instead of rendering nothing while they load and clearing the parent's revealed nodes (#4087).
+- 1bcee91: Server components hydrate their client slot occurrences on demand. The adoption pass mounts none of them; an occurrence mounts when an event lands in it (outermost first, before the event reaches a handler), before any signal or store write applies (every remaining occurrence, against the server's state), or in idle slices after the load event. Hydration stays in progress until the last one has mounted. The write side is an internal pre-write hook in `@solidjs/signals`, tree-shaken from apps without server components.
+- 47a217f: Frames: a signal or store write during deferred hydration mounts only the slot occurrences the server recorded as its readers, then applies, instead of mounting every pending occurrence first. The server names plain signals (`<owner id>~<n>`) and plain stores (by their root) in server-component renders and emits `sc:deps` records per frame; writes it cannot vouch for (unnamed, derived, optimistic, projection or wide sources) still mount everything first. Apps without server components keep their sizes and code paths.
+- dbc5d00: `SSR_BOUNDARY_WATERFALL` now judges a wait by when its work started, the same origin rule the client's `ASYNC_WATERFALL` uses. A nested route meets its levels one render pass at a time, but the router starts every matched level's `lazy()` import and preload together. Before, the first request to a cold server warned about a data waterfall that wasn't there. A wait whose work had all started before the previous wait landed is now left out of the count (`data.parallelWaits`). `lazy()` and `lazyModule()` stamp their imports. The start stamps move from the attribution engine to the core's `OBSERVE.attribution` (`markFlight`, `flightOrigin`), so a router or cache can stamp what it hands out without loading the engine. `attribution.markFlight` writes to the same place.
+- 7c36f2b: Server `For` in a live hole: a row that read an async memo or projection besides its item, or whose item was edited in place, now renders again on each sweep instead of reusing stale markup.
+- 0a49dd8: Live holes: on a live response, a sweep that changed some rows of a `<For>` sends just those rows (replace, append, truncate by index), and the frames client morphs only their ranges. A client whose range doesn't show what the rows were taken against resumes its live connection, which sends the hole whole.
+- 51d005a: Server `<For>` keeps its rows across live-hole sweeps (#4056). A markup hole that re-emits (a live server component, a standing source) re-evaluated every row of a list on every write. During a sweep, a row whose item at the same index is unchanged (the same reference, or a shallow-equal object, as a live source's fresh snapshot usually is) now reuses the row it rendered on the previous sweep. Plain SSR and a server component's first render are unchanged. A row is a function of its item: an item mutated in place keeps its old row, and a row that reads outside data keeps the value it rendered with.
+- c5da908: A live hole whose content calls a slot keeps updating. Before, the first re-run that called a slot latched the hole (`SSR_LIVE_HOLE_LATCHED`, cause "records"). Now each occurrence's identity belongs to its hole: it is its position there, or its `$key`. Calls outside any hole keep the ids they had. A re-run sends a record only for a new occurrence or for args that changed. On the client, the hole's morph resolves slot ranges against the frame's displaced-range index, the same way the root morph does. An occurrence that survives keeps its range, its interior and its mounted component, even when it moves into another hole. New occurrences mount and the ones that are gone dispose. Under deferred hydration, an occurrence that is not mounted yet claims its markup with the record that markup was rendered from, then takes the newer one. A live attribute that calls a slot still latches, and so does a re-run that creates owners.
+- 3f36f77: Server components: binding slots are removed. Client components in slots replace them: place a client component through a `Slot` (`<props.x />`) where the server's markup needs client behavior, or a form `action` for a mutation. Removed with them: the `BindingSlot`, `SlotOutput` and `SlotError` types, the lazy `@solidjs/web/frames/bind` entry and its `"bind"` tier, the `_s:*` position markers and the compiled `ssrClaim` hole, the effect of the `serverComponents` compiler option (`@solidjs/compiler` and `@solidjs/babel-plugin` still accept it, so existing build configs keep working, and ignore it), and the `BINDING_SLOT_POSITION` diagnostic code (`@solidjs/signals`' `DiagnosticCode`, `solid-js`'s `diagnostics.json`). Ordinary slots, their `slot:<id>` ranges and records, and `$key` are unchanged.
+- eb4e019: Hydration no longer hydrates a streamed `<Loading>` fallback when the fragment was already revealed but its `_fr` record hasn't settled yet (an async entry running between the two scripts). The boundary renders nothing and adopts the revealed content once the record settles (#4074).
+- dfb31ed: Derived stores no longer need a seed (#3194). `createStore(fn)`, `createProjection(fn)` and `createOptimisticStore(fn)` accept a derive that takes no draft and answers a complete value — sync, a promise, or an async iterable whose every yield is a complete snapshot. The root is a plain object (an array keeps its `[]` seed); pass `undefined` for the seed to reach the options, e.g. `createStore(fetchUser, undefined, { key: "email" })`. Until the first answer lands the store is unreadable, as with any seed (A25); `seedLoadingValue` needs a seed and is not offered on the seedless form.
+
+  With the seedless form available, a seed is a complete `T` again (#3258's requirement, reverted then because async stores that needed the options slot had to invent one). A `{}` seed on a return-form derive is now a type error: drop it. A mutating derive that builds its object from an empty seed needs `{} as T`.
+
+- 9ac1481: The server error hook (`configureServerErrors`, a render's `onError`) now hears each error object once per request — once per render when no request is in scope — instead of once per process (#4125). Reusing one `Error` object across requests (a module-level constant, a cached rejection) used to notify only the first request's hook and hand later requests the first request's mapped wire value; each request now gets its own report and its own answer. Within a request the hook hears an error once per `kind`: a direct server-function call that throws during SSR is heard as `server-function`, and the `<Errored>` or `<Loading>` that contains it is heard as `render`, so a render's `onError` alone tells you the render failed. Every road still carries the first mapped value.
+- a61c929: A server component in a document marks its live holes only once the render has served something a later commit can replace: an async iterable it pumps, or a loading value or seed shown ahead of its landing. Until then a hole that resolves synchronously ships without `lh` markers, `data-lha` addresses or a ledger binding, because no channel op can ever address it. On a request/response page that is every hole: the 1,406-comment hackernews thread drops from 948 KB to 787 KB and renders in about half the server time.
+- 3d8a8a9: Ship the Solid 2.0 primer for coding agents as the `solid-2.0` skill, emit `CHEATSHEET.md` as the `solid-2.0-cheatsheet` skill on build, give every shipped skill the `name`/`description` frontmatter the Agent Skills format requires, and add the `tanstack-intent` keyword so skill registries discover them in `node_modules`.
+- 3d8a8a9: `solid-js` now ships `diagnostics.json` next to `CHEATSHEET.md`: the machine-readable catalog of every dev diagnostic code — `code`, `kind`, `severity`, `category`, `trigger`, `repair` (the first sentence of the code's section in the `reactivity-diagnostics` skill) and `guideUrl` (that section on GitHub). It is generated from the `DiagnosticCode` union, the RFC's quick-reference table and the skill by `pnpm diagnostics:json`, and a test fails when any of the three (or the committed file) names a different set of codes. The quick-reference table gains its missing `PRIMITIVE_IN_EFFECT_CALLBACK` row.
+- 4ff6580: Server rendering: a suspended read unwinds to its boundary through fewer handler frames. `runWithOwner`, the sync memo's pull, `ssrScope` and `runWithBoundaryErrorContext` restore their state in one catch (and inline on the normal path) instead of a catch plus a finally, and a sync memo whose eager pull met a `NotReadyError` re-raises it for a read in the same synchronous turn instead of running the compute a second time. No behavior change; streaming pages with many pending boundaries flush their shell sooner.
+- Updated dependencies [3d8a8a9]
+- Updated dependencies [a9b9f9e]
+- Updated dependencies [a7fe050]
+- Updated dependencies [52008d9]
+- Updated dependencies [0b6765f]
+- Updated dependencies [a2743fa]
+- Updated dependencies [b8617ec]
+- Updated dependencies [3643c5e]
+- Updated dependencies [4a99c84]
+- Updated dependencies [2172a37]
+- Updated dependencies [1bcee91]
+- Updated dependencies [47a217f]
+- Updated dependencies [61c4436]
+- Updated dependencies [a39acdd]
+- Updated dependencies [667dcff]
+- Updated dependencies [0bda987]
+- Updated dependencies [fb6006e]
+- Updated dependencies [ccd9948]
+- Updated dependencies [1b2406d]
+- Updated dependencies [7093b07]
+- Updated dependencies [dbc5d00]
+- Updated dependencies [6371b91]
+- Updated dependencies [347f242]
+- Updated dependencies [f3973ea]
+- Updated dependencies [c12c420]
+- Updated dependencies [a2d5669]
+- Updated dependencies [5c8ec96]
+- Updated dependencies [4bc7969]
+- Updated dependencies [d3cddff]
+- Updated dependencies [7014aca]
+- Updated dependencies [c2513e3]
+- Updated dependencies [32652bb]
+- Updated dependencies [3f36f77]
+- Updated dependencies [dfb31ed]
+- Updated dependencies [f420740]
+- Updated dependencies [745e807]
+- Updated dependencies [3fc5551]
+- Updated dependencies [42c2568]
+- Updated dependencies [dc063a6]
+- Updated dependencies [71153bf]
+  - @solidjs/signals@2.0.0-rc.16
+
+## 2.0.0-rc.15
+
+### Patch Changes
+
+- 4afc662: Move `dynamicComponent` into `solid-js`. `@solidjs/web` keeps `dynamic` and re-exports `dynamicComponent`.
+- b460640: A rejection contained by `<Errored>` is no longer reported as unhandled when the boundary shares a `{props.children}` slot with an async sibling during SSR (#3973). While its holes were pending, the server boundary threw a combined promise that the slot retry could drop, so its rejection exited Node even though the fallback rendered. The combined promise is now marked handled where it is created; anything that awaits it still sees the rejection.
+- 39450e5: Keep an SSR Errored fallback's hydration ids when its children slot is retried.
+- cbd66e5: Preserve mounted context IDs during hot module evaluation, before another module can refresh a consumer. Previously a consumer refreshing before the context module's accept callback could throw `ContextNotFoundError` or read the context's default instead of the provided value. Unmounted context registrations retain fresh IDs for entry-module remounts.
+- b083833: Non-keyed Show judges staleness from the truthiness that selected the child, so a first mount of when={latest(x)} renders and a live update does not look stale
+- 5413c06: `lazy()` and `lazyModule()` no longer cache a loader promise created while hydration traces an adopted async compute. During the trace the global `Promise` is a never-settling stub, so a loader that builds its promise from it (as Vite's `__vitePreload` does) used to leave `.preload()` and later renders waiting forever (#4013). A load started during the trace is no longer cached, so the next call loads for real.
+- 0c4bff7: Add `lazyModule()` so a lazy module that is not a component can be preloaded and hydrated by module id.
+- 25935fe: `onHydrationEnd` is public API again, as `@experimental` (#4000), so end-to-end tests have a documented end-of-hydration signal instead of reading `_$HY` internals. It was already a runtime export of both entries; only its declarations change (it is no longer stripped as `@internal`), so it adds no runtime bytes. `sharedConfig` and `isHydrationInProgress` stay internal.
+  - `onHydrationEnd(callback)` (`solid-js`): runs `callback` once when the hydration phase ends — the root pass of `hydrate()` over and every streamed `<Loading>` boundary (and every hold an integration registers) resumed or cancelled. With no hydration in progress, and on the server, it runs in the next microtask.
+  - Register it after calling `hydrate()`: registered before hydration starts (or after a `hydrate()` parked mid-parse, #3971), it runs in the next microtask and does not wait for hydration work started afterward.
+  - It reports that the phase ended, not that hydration succeeded: a document root whose module preload fails ends the phase with the server markup kept and not interactive.
+  - It is not page-wide completion with several hydration roots: a root deferred behind its module preload is not counted (GH5).
+  - Intended for test tooling and markers, not for branching what the app renders.
+
+  This reverses the part of the earlier "Remove isHydrating/onHydrationEnd from public API" entry that covered `onHydrationEnd`, as #3718 did for `isHydrating`: hydration snapshots make timing transparent to code inside the app, not to a test reading the page from outside it.
+
+- b749474: Pin `seroval` and `seroval-plugins` to exactly `1.6.7`: 1.6.8 changed the stream representation in a patch release and grew bundles. Stream detection now requires a real stream — the JSON decoder (server functions, frames) treats a value as a stream only when seroval's `isStream` holds and it has a callable `.on`, so decoded plain data that happens to carry a `__SEROVAL_STREAM__` key stays data. The frames container-trace check, the client container-trace materializer and the render stream's channel guard also recognize seroval's untagged stream class, and the frames border walk tests for an async iterator first.
+- 234cfc9: The server-component half of hydration installs from `@solidjs/web/frames`' `installServerComponents()`, not from `hydrate()`: `sharedConfig.holdBoundary` (the client hold on adopted markup counted as a pending boundary), `sharedConfig.hydrateWindow` (the claim window an adopted occurrence re-enters hydration through), fragment ownership by rendering (the `_$HY.fa` term of the reveal policy) and the ledger's published answer `_$HY.fr` on the solid side; the declared claim roots (`sharedConfig.claimRoots`) and the frame-region exclusion of the root sweep on the DOM runtime's side. A hydrating page without server components carries none of it — −686 B minified / ≈ −205…−243 B brotli on the hydrating apps (this returns the bytes the frames A0 correctness pass added to every hydrating page); a server-component page pays the two installers' glue (≈ +220 B minified).
+
+  Public surface (`@internal`): `enableServerComponentHydration()` on `solid-js` (runtime) and `solid-js/internal` (typed), a no-op on the server entry; `installServerComponentHydration()` on `@solidjs/web`, which installs both halves — the frames client calls it where it installs its reveal hook.
+
+- d966729: On the server, a render effect's retry and a projection's re-derive (`createProjection`, `createStore(fn)`, `createOptimisticStore(fn)`) run under their own render's context once a pending source settles, as an async memo's retry already does (#3972). Under concurrent requests they ran under whichever render set the context last, so anything the pass created took the other request's hydration ids.
+- a405039: On the server, an async memo's retry (when its source settles) runs under its own render's context instead of whichever concurrent render set it last (#3972). Under concurrent requests, slot content created by the retry took the other request's hydration ids, which could leave the server spinning or fail hydration with "Hydration key miss".
+- 234cfc9: The store hydration adapters (`createStore(fn)` / `createProjection` / `createOptimisticStore(fn)` under hydration: snapshot adoption, the parked patch backlog, the hybrid handoff) move to their own source module, and `solid-js/internal/container-trace` — the frames traces tier's materializer, a lazy chunk — bundles its own copy of it instead of reading the eager slot `enableHydration()` fills through `withStoreHydration`. Reading the slot from the lazy chunk pinned every adapter into the entry chunk of a server-component page that never creates a client store (an app bundler keeps a module eager whenever an eager module imports it); the copy is inert by construction — the adapters declare no module-level state, and every piece of shared state is read back from the one `solid-js` instance. −2,550 B minified / ≈ −575 B brotli on the compiled server-component page; 0 on pages whose root pass creates a derived store (they keep the eager install); the lazy `trace.js` chunk grows ≈ 0.5 KB brotli.
+
+  Public surface (`@internal`, stripped from the declarations): `withStoreHydration` is removed from the `solid-js` client and server entries (its only consumer was the trace entry); the client entry gains the runtime exports the adapter copy reads — `readSerializedOrCompute`, `subFetch`, `readHydratedValue`, `wrapFirstYield`, `adoptedAnswerStream`, `withHydrationGate`, `onHydrationEnd`, `noHydrationId`, `markTopLevelSnapshotScope`, `hasLoadingWindow`, `isAsyncIterable`, `syncThenable`, `UNASKED` — mirrored on the server entry as inert stubs for export parity.
+
+- Updated dependencies [4f8daa2]
+- Updated dependencies [ad973ed]
+- Updated dependencies [b2bec73]
+- Updated dependencies [49a765c]
+- Updated dependencies [0c70907]
+- Updated dependencies [5a26ebe]
+- Updated dependencies [c189013]
+- Updated dependencies [a963ec1]
+- Updated dependencies [0c70907]
+- Updated dependencies [ad973ed]
+- Updated dependencies [39051bf]
+- Updated dependencies [ef1c297]
+- Updated dependencies [ade4c46]
+- Updated dependencies [eae6e03]
+- Updated dependencies [c9027a9]
+- Updated dependencies [20db6a2]
+- Updated dependencies [1c14992]
+- Updated dependencies [d8ba741]
+- Updated dependencies [e9d549f]
+- Updated dependencies [c689a9a]
+- Updated dependencies [a2dff39]
+- Updated dependencies [f6905dc]
+- Updated dependencies [e0a7548]
+- Updated dependencies [a24e911]
+  - @solidjs/signals@2.0.0-rc.15
+
 ## 2.0.0-rc.14
 
 ### Patch Changes

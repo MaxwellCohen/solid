@@ -90,9 +90,16 @@ const [todos, { addTodo }] = useContext(TodosContext);
 
 The default form `createContext<T>(defaultValue)` is unchanged: `useContext` falls back to `defaultValue` outside any Provider. Reserved for primitive fallbacks (theme, locale, frozen config). For any context carrying reactive state, prefer the default-less form.
 
-> If you want truly app-wide state, **don't use Context** — a module-scope signal/store _is_ a global. Context is for scoping state to a subtree, which is why a Provider is mandatory in the default-less form.
+> Context is for state that belongs to a subtree, which includes app-wide state in an app that renders on the server: a value created inside a component is created once per request, and the Provider owns and disposes it. **Module scope is shared by every request in the same process, so reserve it for constants** (and the `createContext` call itself). That's why a Provider is mandatory in the default-less form.
 
-**Migration:** drop `useX`-with-throw wrappers and call `useContext` directly. If you actively relied on `useContext(ctx)` returning `undefined` for a default-less context, either pass an explicit default to `createContext` or wrap the call in a try/catch.
+`undefined` is never a context value: it means "not provided", on either side. `createContext<T | undefined>(undefined)` is still default-less, and a Provider passing `value={undefined}` counts as no Provider, so both throw `ContextNotFoundError`. The dev message names the context and which case it hit. For an optional context, use `null` as the explicit empty value:
+
+```ts
+const Session = createContext<Session | null>(null);
+useContext(Session); // null outside a Provider; a Provider may pass null too
+```
+
+**Migration:** drop `useX`-with-throw wrappers and call `useContext` directly. If you actively relied on `useContext(ctx)` returning `undefined` for a default-less context, either pass an explicit default to `createContext` (`null` for "empty", not `undefined`) or wrap the call in a try/catch.
 
 ### Derived primitives: function-form `createSignal` and `createStore`
 
@@ -126,7 +133,10 @@ const [cards, setCards] = createStore<Card[]>(
   []
 );
 
-const [card, setCard] = createSignal<Card>(prev => (prev?.pinned ? prev : source()));
+const [card, setCard] = createSignal<Card>(prev => {
+  const next = source(); // read unconditionally so the dependency survives while pinned
+  return prev?.pinned ? prev : next;
+});
 ```
 
 Setting `moveFailed` (or `pinned`) keeps the local value through later updates. Clearing it lets the next source change take over, even when both happen in the same update.

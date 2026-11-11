@@ -1,3 +1,4 @@
+import { markCopyRooted } from "./copies.js";
 import {
   CONFIG_AUTO_DISPOSE,
   CONFIG_CHILDREN_FORBIDDEN,
@@ -7,7 +8,8 @@ import {
   REACTIVE_DISPOSED,
   REACTIVE_FRAME_READ,
   REACTIVE_ZOMBIE,
-  STATUS_PENDING
+  STATUS_PENDING,
+  REACTIVE_NONE
 } from "./constants.js";
 import {
   assertNotInEffectCallback,
@@ -23,12 +25,14 @@ import {
   clearSignals,
   DEV,
   emitDiagnostic,
+  forgetThrownRead,
   registerRoot,
   unregisterRoot
 } from "./dev.js";
+import { clearInFlight } from "./async.js";
 import { clearDeps, unobserved } from "./graph.js";
 import { deleteFromHeap } from "./heap.js";
-import { dirtyQueue, schedule } from "./scheduler.js";
+import { dirtyQueue, globalQueue, pendingNodes, schedule } from "./scheduler.js";
 import type { Computed, Disposable, Owner, Root } from "./types.js";
 
 // L2 (step 2): the parked frame. A pass parks the previous frame's children
@@ -59,6 +63,35 @@ export function dispose(node: Computed<unknown>): void {
   unobserved(node);
 }
 
+// The first error a cleanup threw, boxed so a thrown `undefined` still
+// counts. A throwing cleanup stops neither its siblings nor the rest of the
+// tree: every cleanup runs. The error is rethrown once the teardown is over:
+// by a root's dispose call outside a flush (`disposeRootSelf`), otherwise when
+// the flush ends (`flush`; `runCleanup` schedules one), so a flush is never
+// left half-applied. A halt drops it: the error that halted is the one
+// reported, and a stale one must not surface from a later, unrelated dispose.
+let cleanupError: [unknown] | undefined;
+
+/** Runs a cleanup or `unobserved` hook; a throw is collected, not raised. @internal */
+export function runCleanup(fn: () => void): void {
+  try {
+    fn();
+  } catch (e) {
+    // (D-42, dev: collected and rethrown when the teardown is over — not a
+    // catch in the pass that happens to be disposing.)
+    if (__DEV__) forgetThrownRead();
+    cleanupError ||= [e];
+    schedule();
+  }
+}
+
+/** Rethrows the error `runCleanup` collected, once; `drop` discards it. @internal */
+export function rethrowCleanupError(drop?: boolean): void {
+  const error = cleanupError;
+  cleanupError = undefined;
+  if (error && !drop) throw error[0];
+}
+
 export function disposeChildren(node: Owner, self: boolean = false, zombie?: boolean): void {
   const flags = (node as any)._flags;
   if (flags & REACTIVE_DISPOSED) return;
@@ -67,30 +100,31 @@ export function disposeChildren(node: Owner, self: boolean = false, zombie?: boo
   // cleanups never run and it stays subscribed, rerunning in a torn-down
   // tree (#3561). Death only (`self`): a re-pass leaves the frame reacting
   // until the commit.
-  if (
-    self &&
-    !zombie &&
-    node._x !== null &&
-    (node._x._pendingFirstChild !== null || node._x._pendingDisposal !== null)
-  )
-    disposeChildren(node, false, true);
   if (self) {
+    if (
+      !zombie &&
+      node._x !== null &&
+      (node._x._pendingFirstChild !== null || node._x._pendingDisposal !== null)
+    )
+      disposeChildren(node, false, true);
     (node as any)._flags = flags | REACTIVE_DISPOSED;
     if (__OBSERVE__ && node._parent === null && (node as Root)._root) unregisterRoot(node);
-  }
-  if (self && __DEV__) clearSignals(node);
-  if (self && (node as any)._fn) {
-    if ((node as Computed<unknown>)._x !== null) (node as Computed<unknown>)._x!._inFlight = null;
-    // A death that can unblock the future (L2, `futureBlocked`): a held
-    // flight's — a transaction's or a lane's (its `_x._transaction`) — or a
-    // stale reader's (REACTIVE_FRAME_READ — a frame that derived from one).
-    // Nothing else re-examines a dead node, so make sure a seam comes.
-    if (
-      ((node as Computed<unknown>)._statusFlags & STATUS_PENDING &&
-        (node as Computed<unknown>)._x?._transaction != null) ||
-      flags & REACTIVE_FRAME_READ
-    )
-      schedule();
+    if (__DEV__) clearSignals(node);
+    if ((node as any)._fn) {
+      clearInFlight(node as Computed<unknown>);
+      // A death that can unblock the future (L2, `futureBlocked`): a held
+      // flight's — a transaction's or a lane's (its `_x._transaction`) — or a
+      // stale reader's (REACTIVE_FRAME_READ — a frame that derived from one).
+      // An idle pending queue would also pin it until an unrelated flush.
+      // Nothing else re-examines a dead node, so make sure a seam comes.
+      if (
+        ((node as Computed<unknown>)._statusFlags & STATUS_PENDING &&
+          (node as Computed<unknown>)._x?._transaction != null) ||
+        flags & REACTIVE_FRAME_READ ||
+        pendingNodes.length
+      )
+        schedule();
+    }
   }
   let child = zombie ? node._x!._pendingFirstChild : node._firstChild;
   if (zombie) node._x!._pendingFirstChild = null;
@@ -162,7 +196,7 @@ export function disposeChildren(node: Owner, self: boolean = false, zombie?: boo
     const effectCleanup = node._cleanup;
     node._cleanup = undefined;
     if (__DEV__) enterDisposal();
-    effectCleanup();
+    runCleanup(effectCleanup);
     if (__DEV__) exitDisposal();
   }
 }
@@ -187,9 +221,7 @@ function runDisposal(node: Owner, zombie?: boolean): void {
   if (zombie) node._x!._pendingDisposal = null;
   else node._disposal = null;
 
-  // No try/finally: it would survive into prod (rollup keeps the frame). A
-  // throw leaves the depth raised; dev.ts clears the stale count on the next
-  // microtask, since teardown never spans one (core.ts).
+  // Each cleanup is guarded (`runCleanup`), so the depth is always lowered.
   if (__DEV__) enterDisposal();
   if (Array.isArray(disposal)) {
     // Unwind order (#3572, restores 1.x #1562): later registrations run
@@ -197,11 +229,10 @@ function runDisposal(node: Owner, zombie?: boolean): void {
     // so with LIFO a body that registers cleanup before creating its children
     // tears down after them — the same order a per-component owner gives.
     for (let i = disposal.length - 1; i >= 0; i--) {
-      const callable = disposal[i];
-      callable.call(callable);
+      runCleanup(disposal[i]);
     }
   } else {
-    disposal.call(disposal);
+    runCleanup(disposal);
   }
   if (__DEV__) exitDisposal();
 }
@@ -211,7 +242,7 @@ function childId(owner: Owner, consume: boolean): string {
   while (counter._config & CONFIG_TRANSPARENT && counter._parent) counter = counter._parent;
   if (counter.id != null)
     return formatId(counter.id, consume ? counter._childCount++ : counter._childCount);
-  throw new Error(__DEV__ ? "Cannot get child id from owner without an id" : "");
+  throw __DEV__ ? new Error("Cannot get child id from owner without an id") : new Error();
 }
 
 /**
@@ -300,13 +331,15 @@ export function getOwner(): Owner | null {
 /**
  * Low-level: registers `fn` as a disposal callback on the current owner.
  * Most code should use `onCleanup()` from `solid-js`, which adds dev-mode
- * checks. `cleanup()` is the unchecked primitive used by internals.
+ * checks. `cleanup()` is the unchecked primitive used by internals; `owner`
+ * (internal) targets a specific owner's disposal list instead of the ambient
+ * one.
  */
-export function cleanup(fn: Disposable): Disposable {
-  if (!context) return fn;
-  if (!context._disposal) context._disposal = fn;
-  else if (Array.isArray(context._disposal)) context._disposal.push(fn);
-  else context._disposal = [context._disposal, fn];
+export function cleanup(fn: Disposable, owner: Owner | null = context): Disposable {
+  if (!owner) return fn;
+  if (!owner._disposal) owner._disposal = fn;
+  else if (Array.isArray(owner._disposal)) owner._disposal.push(fn);
+  else owner._disposal = [owner._disposal, fn];
   return fn;
 }
 
@@ -332,6 +365,9 @@ export function isDisposed(node: Owner): boolean {
 
 function disposeRootSelf(this: Root, self: boolean = true): void {
   disposeChildren(this, self);
+  // Outside a flush the dispose call rethrows; inside one, the flush does.
+  // Kept out of `disposeChildren`, whose hot path it slows.
+  if (cleanupError && !globalQueue._running) rethrowCleanupError();
 }
 
 /**
@@ -346,13 +382,19 @@ export function createOwner(options?: { id?: string; transparent?: boolean }) {
   const parent = context;
   const transparent = options?.transparent ?? false;
   // Prod and observe boilerplates (see core.ts computed()). The observe
-  // literal carries the `_name` slot the rendering layer fills with the
-  // component label (`owner._name = "<App>"`) — a slot, so labelling a root
-  // is a plain store rather than a shape fork between labelled and plain roots.
+  // literal carries the `_name` and `_loc` slots the rendering layer fills
+  // with the component label and JSX site (`owner._name = "<App>"`,
+  // `owner._loc = "src/App.tsx:3:5"`) — slots, so labelling a root is a
+  // plain store rather than a shape fork between labelled and plain roots.
   const owner = __OBSERVE__
     ? ({
         id: inheritId(options, transparent, parent),
         _config: transparent ? CONFIG_TRANSPARENT : 0,
+        // Present from birth: disposeChildren marks death here on roots too, and
+        // a first store of a missing property is a shape transition plus a
+        // properties-store allocation per root — on a 100×4 table teardown that
+        // was 12 KB and most of disposal's time (2026-10-17).
+        _flags: REACTIVE_NONE,
         _root: true,
         _parentComputed: (parent as Root)?._root ? (parent as Root)._parentComputed : parent,
         _firstChild: null,
@@ -364,11 +406,17 @@ export function createOwner(options?: { id?: string; transparent?: boolean }) {
         _x: null,
         _parent: parent,
         dispose: disposeRootSelf,
-        _name: undefined as string | undefined
+        _name: undefined as string | undefined,
+        _loc: undefined as string | undefined
       } as Root)
     : ({
         id: inheritId(options, transparent, parent),
         _config: transparent ? CONFIG_TRANSPARENT : 0,
+        // Present from birth: disposeChildren marks death here on roots too, and
+        // a first store of a missing property is a shape transition plus a
+        // properties-store allocation per root — on a 100×4 table teardown that
+        // was 12 KB and most of disposal's time (2026-10-17).
+        _flags: REACTIVE_NONE,
         _root: true,
         _parentComputed: (parent as Root)?._root ? (parent as Root)._parentComputed : parent,
         _firstChild: null,
@@ -433,12 +481,16 @@ export function createOwner(options?: { id?: string; transparent?: boolean }) {
  * const detached = runWithOwner(null, () => createRoot(d => d));
  * ```
  *
- * @description https://docs.solidjs.com/reference/reactive-utilities/create-root
+ * @description https://v2.solidjs.com/reference/solid-js/advanced/owner-introspection/create-root
  */
 export function createRoot<T>(
   init: ((dispose: () => void) => T) | (() => T),
   options?: { id?: string; transparent?: boolean }
 ): T {
   const owner = createOwner(options);
-  return runWithOwner(owner, () => init(() => owner.dispose()));
+  if (__DEV__) markCopyRooted();
+  // A bound function, not an arrow: an arrow would share this scope, which
+  // holds `init`, so keeping `dispose` would keep `init` and all it closes
+  // over alive (#4095).
+  return runWithOwner(owner, () => init(disposeRootSelf.bind(owner, true)));
 }

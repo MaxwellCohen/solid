@@ -22,6 +22,13 @@ export interface Link {
 export interface NodeOptions<T> {
   id?: string;
   name?: string;
+  /**
+   * Source location (`file:line:col`, root-relative) written by the
+   * compiler's `sourceNames` `locations` kind; dev and observe builds keep it
+   * for console reports and diagnostic events, production ignores it. Not
+   * meant to be written by hand.
+   */
+  loc?: string;
   transparent?: boolean;
   equals?: ((prev: T, next: T) => boolean) | false;
   ownedWrite?: boolean;
@@ -79,6 +86,9 @@ export interface NodeExtension {
   _error: unknown;
   _blocked: boolean | undefined;
   _pendingSources: Set<Computed<any>> | undefined;
+  /** The clock of this node's pass served an answered-then-reasked first
+   * answer (D-22, F-9; `read`): one served pass a flush. */
+  _served?: number;
   _unobserved: (() => void) | undefined;
   _snapshotValue: any;
   /** L2 — the previous pass's frame, parked for this node's commit: its child
@@ -102,15 +112,30 @@ export interface NodeExtension {
   /** Provenance (A18, #3331): the question this node's guess or latest
    * flight answers (`scheduler.question`); 0 when unstamped. */
   _q: number;
-  /** Lanes (plan sec. 28) — the lane's value for this node while CONFIG_OVERRIDE is
-   * set: a written guess, or a lane pass's derivation. `NOT_PENDING` when
-   * none. The screen shows it once the lane has revealed (`_shown`); a
-   * direct read sees it throughout; the committed truth stays `_value`. */
-  _lane: unknown;
+  /** Lanes: the node's lane has shown a value of it (lanes.ts `laneSeam`,
+   * `setLaneValue`): a guess is `_value` and the lane's record (truth.ts
+   * `covers`) holds the value it covered; before, the record holds the
+   * guess. Cleared when the node leaves its lane. */
+  _shown: boolean;
+  /** #4544: the hold (or, before one, the flush clock) under which a verdict
+   * window read this node's staging (verdict.ts `holdStaging`). Stale once
+   * that hold lands or dissolves: nothing clears it. Unset until then. */
+  _askedIn?: Transaction | number;
   /** `affects()` marks live on this node (affects.ts): declared in-flight
    * changes — `isPending` reads true for it and its derivations while any
    * is live. A count, never a hold. */
   _marks: number;
+  /** D-41: the error a node showed when a re-ask made it pending — still
+   * the display (D-39) until a new answer commits: an untracked read throws
+   * it, `isPending` reads a staged answer as a change over it, and a
+   * recovery equal to the last good value is still a new answer. */
+  _shownError: unknown;
+  /** R5: the frame pass's flight of a `latest()`/`isPending()` reader the
+   * seam re-derived in the verdict lane (lanes.ts `laneSeams`) — the
+   * frame's answer to the question it asked, which the transaction's
+   * landing adopts instead of asking it again (lanes.ts `adoptParked`, F-9). Cleared
+   * by any later pass. */
+  _parked?: PromiseLike<any>;
 }
 
 export interface RawSignal<T> {
@@ -146,6 +171,8 @@ export type Signal<T> = RawSignal<T>;
 export interface Owner {
   id?: string;
   _config: number;
+  /** Lifecycle flags (REACTIVE_*); roots carry only REACTIVE_DISPOSED. */
+  _flags: number;
   _snapshotScope?: boolean;
   /** Effect-returned cleanup; managed across reruns, invoked at true disposal */
   _cleanup?: () => void;
@@ -164,6 +191,13 @@ export interface Owner {
    * (`<App>`). A slot in the observe/dev literals; absent from prod.
    */
   _name?: string;
+  /**
+   * Observe-tier source location (`file:line:col`): the `loc` option, or
+   * the JSX site the rendering layer writes on a component root. A slot
+   * beside `_name`; absent from prod. Reserved from property mangling, like
+   * `_name`, because solid-js writes it and the core's diagnostics read it.
+   */
+  _loc?: string;
 }
 
 export interface Computed<T> extends RawSignal<T>, Owner {

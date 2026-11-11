@@ -100,6 +100,8 @@ describe("@solidjs/compiler transform", () => {
       const result = transform(fs.readFileSync(path.join(coveragePragmasDir, "code.js"), "utf8"), {
         filename: "coveragePragmas.jsx",
         moduleName: "r-dom",
+        // `<Show>` stands in for any component here: keep it a component.
+        lowerShow: false,
         generate
       });
 
@@ -165,6 +167,55 @@ describe("@solidjs/compiler transform", () => {
 
     expect(result.code).not.toContain("_$applyRef");
     expect(result.code).toContain("_$createComponent(Child, {})");
+  });
+
+  it("keeps component refs written behind TypeScript casts", () => {
+    const source = `
+      const setRef = el => {};
+      const a = <Comp ref={[setRef, props.ref] as any} role="x" />;
+      const b = <Comp ref={setRef as any} />;
+      const c = <Comp ref={props.ref!} />;
+      const d = <Comp ref={props.ref satisfies any} />;
+      const e = <Comp ref={factory() as any} />;
+      `;
+
+    for (const generate of ["dom", "ssr", "universal"]) {
+      const { code } = transform(source, {
+        filename: "cast-refs.tsx",
+        moduleName: "r-dom",
+        generate
+      });
+
+      expect(code).toContain("ref: [setRef, props.ref],");
+      expect(code).toContain("{ ref: setRef }");
+      expect(code).toContain("props.ref = r$");
+      expect(code.match(/var _ref\$\d* = props\.ref;/g)).toHaveLength(2);
+      expect(code).toMatch(/var _ref\$\d* = factory\(\);/);
+      expect(code).not.toContain(" as any");
+      expect(code).not.toContain("satisfies");
+      expect(code).not.toContain("props.ref!");
+    }
+
+    const elements = `
+      let myRef;
+      const a = <view ref={myRef as any} />;
+      const b = <view ref={props.ref!} />;
+      `;
+
+    for (const generate of ["dom", "universal"]) {
+      const { code } = transform(elements, {
+        filename: "cast-refs.tsx",
+        moduleName: "r-dom",
+        generate
+      });
+
+      expect(code).toMatch(/var _ref\$\d* = myRef;/);
+      expect(code).toMatch(/var _ref\$\d* = props\.ref;/);
+      expect(code).toContain(": myRef = _el$;");
+      expect(code).toContain(": props.ref = _el$2;");
+      expect(code).not.toContain(" as any");
+      expect(code).not.toContain("props.ref!");
+    }
   });
 
   it("covers the static subset of the Babel simpleElements fixture", () => {
@@ -539,9 +590,11 @@ describe("@solidjs/compiler transform", () => {
     const label = '_$createComponent(Home, {}, "Home")';
     const binding = '{ name: "div.class" }';
 
+    // `true` turns the `locations` kind on too: the label gains its
+    // `file:line:col`, the options literal a `loc` after `name`.
     const every = transform(code, { ...opts, sourceNames: true }).code;
-    expect(every).toContain(label);
-    expect(every).toContain(binding);
+    expect(every).toContain('_$createComponent(Home, {}, "Home", "input.jsx:1:33")');
+    expect(every).toContain('name: "div.class",\n\tloc: "input.jsx:1:19"');
     const components = transform(code, { ...opts, sourceNames: { components: true } }).code;
     expect(components).toContain(label);
     expect(components).not.toContain(binding);
@@ -579,9 +632,12 @@ describe("@solidjs/compiler transform", () => {
     const label = '_$createComponent(Home, {}, "Home")';
     const binding = 'name: "div.class"';
 
+    // Every kind follows `dev`, `locations` included: the dev label carries
+    // its `file:line:col`, the options literal a `loc` after `name`.
     const dev = transform(code, { ...opts, dev: true }).code;
-    expect(dev).toContain(label);
+    expect(dev).toContain('_$createComponent(Home, {}, "Home", "input.jsx:1:33")');
     expect(dev).toContain(binding);
+    expect(dev).toContain('loc: "input.jsx:1:19"');
 
     const prod = transform(code, { ...opts, dev: false }).code;
     expect(prod).not.toContain('"Home"');
@@ -909,17 +965,17 @@ describe("@solidjs/compiler transform", () => {
     expect(result.code).not.toContain("_$delegateEvents");
   });
 
-  it("treats removed `on:` namespaced names as plain attributes", () => {
-    // Only `on` + an uppercase letter is an event handler; `on:click` is an
-    // unknown namespace like any other.
-    const result = transform("<button on:click={() => increment()} />", {
-      filename: "input.jsx",
-      moduleName: "r-dom"
-    });
-
-    expect(result.code).toContain('_$setAttribute(_el$, "on:click", () => increment());');
-    expect(result.code).not.toContain("addEventListener");
-    expect(result.code).not.toContain("_$delegateEvents");
+  it("rejects the removed `on:` namespace with a migration hint (#4187)", () => {
+    // Only `on` + an uppercase letter is an event handler; the 1.x `on:`
+    // namespace is a compile error instead of a silent literal attribute.
+    expect(() =>
+      transform("<button on:click={() => increment()} />", {
+        filename: "input.jsx",
+        moduleName: "r-dom"
+      })
+    ).toThrow(
+      "`on:click` on <button> uses the `on:` namespace, which was removed in Solid 2.0. Use a camelCase handler such as `onClick={handler}`"
+    );
   });
 
   it("lowers lowercase on* expressions as attributes, not events", () => {

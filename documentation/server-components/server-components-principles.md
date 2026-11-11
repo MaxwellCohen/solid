@@ -837,10 +837,12 @@ DOM; nothing per-mount survives unmount.
   any `_fr` declaration still unsettled then is marked rejected with a truncation
   error, releasing its boundary through the normal rejection path and its
   document-adoption waiters through the ledger (closes solidjs/solid#2958 for
-  documents). The sweep arms only when the runtime booted while the document was
-  still streaming — a late-loaded runtime can't tell a completed page from a
-  truncated one. Frame-stream truncation (pump ends without the root's `complete`
-  chunk) lands with the `:error` content-state records above, not before them.
+  documents). A runtime that boots after parsing sweeps at boot, but only under
+  the in-render bootstrap (`_$HY.s`): every declaration and settle there is a
+  parser-inserted script, so a declaration still pending can no longer settle.
+  Under a host-placed bootstrap a late runtime stays out. Frame-stream truncation
+  (pump ends without the root's `complete` chunk) lands with the `:error`
+  content-state records above, not before them.
 
 ### 5.6 Head and assets
 
@@ -1016,10 +1018,18 @@ retired as a pole and survives only as potential authoring sugar.
      re-run them, equality-gate the resolved HTML (marker-stripped
      baselines), and re-emit changes as keyed `hole` chunks the client
      morphs in place. Convergence is commit-driven and impurity-gated:
-     an evaluation that emits records or creates reactive scopes latches
-     (the record gate and the rxcore creation stamp), retry chains
-     resolve mint-suppressed (`$lhSuppress` through `buildAsyncWrap`),
-     and boundary/slot machinery is `$lhSkip`-tagged out.
+     an evaluation that creates reactive scopes latches (the rxcore
+     creation stamp), retry chains resolve mint-suppressed
+     (`$lhSuppress` through `buildAsyncWrap`), and boundary/slot
+     machinery is `$lhSkip`-tagged out. *[Shipped with a record gate
+     too: a hole whose evaluation called a slot latched, records being
+     emit-once. Retired (2026-10-17): a hole is an occurrence scope, a
+     call's position in it keeps the id the render gave it, and a re-run
+     re-sends a record only for a new occurrence or changed args; the
+     client's hole morph resolves slot ranges against the frame's
+     displaced-range index, as the root morph does, so a surviving
+     occurrence stays mounted. A client component in a slot inside
+     markup that re-renders from a live source is an ordinary case.]*
    - Content holes + the chat slice: **done.** The chat demo streams
      markdown token-by-token through a `<Loading>`-wrapped iterable-fed
      `innerHTML` hole, no client component; `ctx.hold()` keeps the
@@ -1117,7 +1127,8 @@ retired as a pole and survives only as potential authoring sugar.
    attribute value asserted), on any arrival path; pending indicators
    settle with the transaction. No watermark, no dependency on Stage 8.
    **Amended 2026-09-27 (§9.2.2): `predict` retired before build;
-   Stage 7 is attribute slots.** A server component spreads a
+   Stage 7 is attribute slots.** **Amended again 2026-10-16 (§9.2.6): binding
+   slots, attribute slots' final form, are removed.** A server component spreads a
    *called* slot onto one of its own elements
    (`{...props.check({ id, completed })}`); the client fill returns
    attributes over slot args and `createOptimistic*` state; the
@@ -3183,7 +3194,7 @@ the text above, the build is right and the text is amended here:
   names percent-encode onto `[A-Za-z0-9_.-]`, the occurrence
   alphabet, so `:`/`=`/`,` split exactly. A zero-arg call is the
   occurrence named by the prop alone (`codeBlock:onCopy`, no `#n`) —
-  one data context per prop, the notes search field's shape. The
+  one data context per prop, the chat copy button's shape. The
   document face writes the value where the position would have put
   it and the marker after. A class-name or style-property position
   whose names all resolve empty writes no `class=""` — the marker
@@ -3532,6 +3543,31 @@ render nothing, and the open item; in its build record, "placed as
 text" among the misuses. The `text` finding reason is retired. The
 rule's sentence widens with it: **a slot property is a JSX
 attribute value or a text child, whole, and nothing else.**
+
+#### 9.2.6 Amendment — binding slots removed (2026-10-16)
+
+Binding slots (§9.2.2–§9.2.5) are removed. What went: `BindingSlot`
+and its `SlotOutput`/`SlotError` types, the `_s:*` position markers
+and the `<!--_s:t=…-->` text pairs, the server stand-ins
+(`slotValue`, `SLOT_VALUE`), the compiled `ssrClaim` hole and the
+claims arming behind it, what the `serverComponents` compiler option
+compiled (Babel and native still accept the option, and ignore it),
+the lazy bind tier (`@solidjs/web/frames/bind`) and its `"bind"` tier
+announcement, and the `BINDING_SLOT_POSITION` diagnostic. A slot is
+one thing again: a client component the client places at a position
+in the server's markup (`<props.x />`), with its `slot:<id>:start/end`
+range, its args record and its keyed `$key` repeat collapse
+unchanged.
+
+Client behavior on server markup is a client component in a slot: a
+form `action` for a mutation, a fill that owns the control, or — for
+many identical controls inside a live hole, where a slot per control
+would latch the hole — one slot occurrence that delegates from the
+document (`examples/chat`'s Copy button). The cost is the one binding
+slots paid for: a click on server markup before that occurrence
+mounts does nothing, where the bind tier replayed it. §9.2.2–§9.2.5
+stand above as the record of what was built and why; where they and
+this amendment disagree, this amendment wins.
 
 ### 9.3 Stage 8 seed — connection-shaped transport (2026-08-17)
 
@@ -4292,6 +4328,71 @@ a URL caches already hold for the second — #3094 — and reads carry
 no transport header — #3406); a server-side `live` declaration may
 cross-check in dev but cannot decide (topology); (f) is the plan's.
 
+#### 9.5.1 Amendment — `broadcast`: one render per live address (2026-10-21)
+
+`live()` renders once per connection. Measured on dbmon (400 rows,
+10% changing, 5 ticks/s, same batch): ~4 ms of server CPU per viewer
+per tick, one core saturated near 50 viewers. A profile at 25 viewers
+puts ~95% of it in the render (`textDigest` 27%, keyed `sameItem`
+21%, live-hole sweeps ~20%); brotli is under 1%. Replaying one
+captured tick to N readers with no render costs ~0.55 ms per
+viewer-tick, so the render, not the fan-out, is the cost to remove.
+
+**Ruling: sharing is declared, not detected.** `broadcast(fn)` (RFC
+10, "`broadcast(fn)`") is a live variant whose answer is the same for
+every caller with the same arguments. It implies `live` and `GET`.
+At the live address, callers with the same function id and
+arguments share one render and each connection is a tap; the outer
+body still runs per caller; the shared render runs under its own
+request event; the render ends with its last tap.
+
+Rejected, and why:
+
+- **Implicit sharing, demoted on a request read.** Detection decides
+  behavior from what the runtime happened to see; it misses reads it
+  can't see (a library's own `AsyncLocalStorage`, a cookie read
+  through another module, a cache keyed by user), and a miss leaks
+  one viewer's data to the others instead of degrading.
+- **Sharing by default, falling back to per-viewer.** The same
+  detection problem, now in every app's every `live()`. Sharing also
+  changes behavior when nothing reads the request: effects and
+  cleanups run once per key, not per viewer (presence counts,
+  per-connection logging, a `request.signal` listener). And an edit
+  that adds a helper call would move a page between the two cost
+  curves with nothing in the code saying so.
+- **`shared(fn)`.** The name reads as if it applied off the live
+  address (coalescing one-shot reads, which is a CDN's job).
+  `broadcast` says what happens and only exists where it can.
+- **`broadcastQuery`.** Not needed: a router's live query takes any
+  live reference, and client-side dedupe is the query's own.
+
+**Capture rule.** The returned component may read the function's
+parameters, its own locals and module scope; the compiler's
+directives pass rejects any outer-body local it, or a local function
+it reaches, reads. It is strict: outer-body data derived only from
+the arguments is rejected too, since `await load(id)` and
+`await getUser()` look alike, and outer-body data would be frozen
+at the first call in any case. Calls into imported code are out of
+static reach; the render's own event (request fields absent, dev
+warning, fresh router `query` cache) covers them at runtime.
+
+**Parity with per-viewer live.** A late tap gets the latest record
+per key with only the slot data those records reference, then the
+shared batches. A reconnect's have-list is honored: a matching
+skeleton gets only the holes and addressed attributes that moved.
+Superseded slot-data versions are pruned from the shared table.
+
+**Measured** (same batch, ms/s): 10 viewers 305-313 vs 77-81; 50
+viewers 1119-1129 (saturated) vs 172-188; 100 viewers 279-292 with
+`broadcast`. One viewer costs the same either way; client bytes are
+unchanged.
+
+**Open.** Sharing covers server-component answers only; a broadcast
+value-shaped source is served per connection. Not built: dropping
+queued batches for a slow tap, multiplexing several live keys over
+one connection (each key is its own connection, which matters only
+under HTTP/1.1), and an error for `prerendered` with `live`.
+
 ### 9.6 Stage 9 seed — mutations through a live connection (2026-09-28)
 
 Recorded from the fit conversation (§10); nothing here is built.
@@ -4457,7 +4558,13 @@ slots (§9.2.3) with markup slots for the elements that exist only
 because of client state. The ratio is one to ten. Rejections: none
 (behavior only). *Standing: this is what attribute slots are for,
 and the advice writes itself — bind the position, don't lift the
-element.* Examples: `chat`'s `codeBlock`, `notes`' `search` field.
+element.* Examples: `chat`'s `codeBlock`; `notes`' expand toggle,
+the markup-slot half (the excerpt exists only while expanded, so it
+ships once as a record, A1). `notes`' search field was an
+attribute-slot example while its shell was a server component; with
+the shell on the client there is no server markup around it to
+annotate, and it is a client component, as in the React demo. The
+position has to sit in server markup for the slot to be the answer.
 
 **Q4 — Widgets.** Small data, this user's alone, changing faster
 than a round trip, with dense interaction on every element:
@@ -4494,7 +4601,7 @@ example          quadrant        role
 ───────          ────────        ────
 hackernews       Q1              front door for the core
 hackernews-spa   —               client control for hackernews
-notes            Q1 + Q3 + Q5    list + search slot + single-flight mutations
+notes            Q1 + Q3 + Q5    list + expand slot + single-flight mutations
 chat             Q2 + Q3         live generation + attribute slot
 room             Q2              live transport end to end
 todos            Q4              client control for todos-server

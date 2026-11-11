@@ -91,7 +91,9 @@ var _sk$ = k => k === "foo" || k === "disabled" || k === "title" || k === "style
   _sk$5 = k => k === "class" || k === "data-kind",
   _sk$6 = k => k === "class" || k === "data-id",
   _sk$7 = k => k === "id",
-  _sk$8 = k => k === "disabled" || k === "type" || k === "tabindex" || k === "style";
+  _sk$8 = k => k === "disabled" || k === "type" || k === "tabindex" || k === "style",
+  _sk$9 = k => k === "class",
+  _sk$0 = k => k === "title";
 _$ssrSelectValues();
 import * as styles from "./styles.module.css";
 import { binding } from "somewhere";
@@ -146,7 +148,7 @@ const template = _$ssrElement(
 );
 const template2 = _$ssrElement(
   "div",
-  getProps("test"),
+  () => getProps("test"),
   [
     ((_v$ = _$escape(rowId)), _$ssr(_tmpl$2, _v$)),
     ((_v$2 = () => _$escape(row.label)), _$ssr(_tmpl$2, _v$2)),
@@ -203,11 +205,11 @@ const template16 = _$ssr(
 const template17 = _$ssr(_tmpl$13, "a  b  c");
 const template18 = _$ssrElement(
   "div",
-  {
+  () => ({
     get [key()]() {
       return props.value;
     }
-  },
+  }),
   undefined,
   false
 );
@@ -289,11 +291,11 @@ const template27 = _$ssrElement(
 );
 const template28 = _$ssrElement(
   "label",
-  api(),
+  api,
   [
-    _$ssrElement("span", api(), ["Input is ", () => (api() ? "checked" : "unchecked")], false),
-    _$ssrElement("input", api(), undefined, false),
-    _$ssrElement("div", api(), undefined, false)
+    _$ssrElement("span", api, ["Input is ", () => (api() ? "checked" : "unchecked")], false),
+    _$ssrElement("input", api, undefined, false),
+    _$ssrElement("div", api, undefined, false)
   ],
   false
 );
@@ -555,7 +557,7 @@ const styleProps = {
   children: css
 };
 const template90 = [
-  _$ssrElement("style", styleProps(), () => css(), false),
+  _$ssrElement("style", styleProps, () => css(), false),
   _$ssrElement(
     "style",
     [
@@ -768,3 +770,33 @@ var _g$4 = _$ssrGroup(
 );
 const nullableAttributes = _$ssr(_tmpl$56, _g$4, _g$4, _g$4);
 const emptyAttributes = _$ssr(_tmpl$57);
+
+// solidjs/solid#4081: a ref expression that calls something is evaluated
+// beside a spread too, as the template path evaluates it (`_ref$ = expr`), so
+// a ref factory's owned setup runs on both sides. It runs in the attrs thunk:
+// after the spread and the tail markup, before the children. A call-free ref
+// (`ref={link}`, template116) is not evaluated.
+const spreadRefFactory = _$ssrElement(
+  "div",
+  spread,
+  undefined,
+  false,
+  undefined,
+  () => (refFactory(), "")
+);
+const spreadRefTail = _$ssrElement(
+  "div",
+  spread,
+  undefined,
+  false,
+  _sk$9,
+  () => ([refFactory(), props.ref], ' class="row"')
+);
+const spreadRefDynamicTail = _$ssrElement(
+  "input",
+  spread,
+  undefined,
+  false,
+  _sk$0,
+  () => _$ssrElementAttribute("title", title()) + (refFactory(), "")
+);

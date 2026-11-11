@@ -182,6 +182,29 @@ export interface ServerFunctionMetadata {
    * `withMeta` write wins.
    */
   readonly name?: string;
+  /**
+   * This function's own send, client side: the transport calls it instead
+   * of the configured `fetch` for every request the function makes, with
+   * the configured send (the app's `fetch`, or the global) as `next`. For
+   * an integration that answers a declared function's calls itself — a
+   * prerendered build's static artifacts, a cache — while the app's
+   * transport `fetch` stays the app's: pass on what you don't answer
+   * through `next`. The contract is `fetch`'s (see
+   * `ServerFunctionsClientConfig.fetch`); hydration adopts a
+   * server-rendered read only if the send reaches the global `fetch` in the
+   * same tick.
+   *
+   * ```ts
+   * withMeta(getPosts, {
+   *   fetch: (address, init, next) => cached(address) ?? next(address, init)
+   * });
+   * ```
+   */
+  readonly fetch?: (
+    address: string,
+    init: RequestInit,
+    next: (address: string, init: RequestInit) => Response | Promise<Response>
+  ) => Response | Promise<Response>;
   /** User-declared transport metadata attached with `withMeta`. */
   readonly [key: string]: unknown;
 }
@@ -221,7 +244,10 @@ export type BodyFormatValue = (typeof BodyFormat)[keyof typeof BodyFormat];
 const codecConfig = { codec: undefined }; /**
  * Configures the codec options for the server function wire format (extra
  * Seroval plugins, feature policy, depth limit). Both peers must configure
- * identical options or payloads will not round-trip. Usually called
+ * identical options or payloads will not round-trip. The argument leg
+ * (client → server) narrows the set on top of whatever is configured here:
+ * arguments are client input and never decode `Response` or `Request`
+ * values; results and hydration keep the full set. Usually called
  * indirectly through `configureServerFunctionsClient` /
  * `configureServerFunctionsServer` (their `codec` option writes through to
  * here); call it directly only from universal code configuring both sides
@@ -857,6 +883,16 @@ export const LIVE_WIRE = Symbol("solid.LiveWire");
  * Nothing distinguishes it otherwise: a CDN 404 and a skew 404 look alike.
  */
 export const UNKNOWN_HEADER = "X-Server-Function-Unknown";
+
+/**
+ * Header carrying a build id. The build integration adds it to calls
+ * through `prepareRequest`; the client runtime never sends it. A server
+ * configured with another `buildId` answers `409` with its own id under the
+ * same header and the `UNKNOWN_HEADER` label, and does not run the function.
+ * This catches the skew the unknown-id 404 cannot: a function whose id
+ * survived the deploy but whose arguments or result changed shape.
+ */
+export const BUILD_HEADER = "X-Server-Function-Build";
 
 /**
  * Header carrying a redirect to scripted callers. fetch FOLLOWS redirect

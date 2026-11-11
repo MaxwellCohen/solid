@@ -1,5 +1,158 @@
 # @solidjs/h
 
+## 2.0.0-rc.21
+
+### Patch Changes
+
+- 480f522: A getter `class` on a tag with static classes no longer throws "Invalid property descriptor". A component that forwards its props to a selector-class element (`props => h("button.btn", props)`) and is given a reactive `class` received it as a getter, and merging it with the static classes built a descriptor with both `get` and `value`. The getter is now read through the props object, so the merged class keeps the static classes and stays reactive.
+- Updated dependencies [32163a9]
+- Updated dependencies [bb51da6]
+- Updated dependencies [3c47d06]
+- Updated dependencies [61bb177]
+- Updated dependencies [62745f6]
+- Updated dependencies [551ef0d]
+- Updated dependencies [6b6b4da]
+- Updated dependencies [3c47d06]
+- Updated dependencies [b656418]
+- Updated dependencies [6262453]
+- Updated dependencies [5ae39fc]
+- Updated dependencies [ccfc7ea]
+- Updated dependencies [ccfc7ea]
+- Updated dependencies [5ae39fc]
+- Updated dependencies [b7e4f16]
+  - @solidjs/web@2.0.0-rc.21
+
+## 2.0.0-rc.20
+
+### Patch Changes
+
+- Updated dependencies [122797e]
+- Updated dependencies [56eb192]
+  - @solidjs/web@2.0.0-rc.20
+
+## 2.0.0-rc.19
+
+### Patch Changes
+
+- Updated dependencies [2c9fdd9]
+- Updated dependencies [2a0da2f]
+- Updated dependencies [76e9094]
+- Updated dependencies [f5cf675]
+- Updated dependencies [542ff6f]
+- Updated dependencies [2f7dc84]
+- Updated dependencies [2c9fdd9]
+- Updated dependencies [e0e4224]
+- Updated dependencies [b1b0667]
+- Updated dependencies [5601848]
+- Updated dependencies [88ea86c]
+- Updated dependencies [4eb570e]
+- Updated dependencies [e8b0b15]
+  - @solidjs/web@2.0.0-rc.19
+
+## 2.0.0-rc.18
+
+### Patch Changes
+
+- Updated dependencies [f5ad065]
+- Updated dependencies [ec4483d]
+- Updated dependencies [4645cff]
+- Updated dependencies [b883323]
+- Updated dependencies [a4e9d10]
+  - @solidjs/web@2.0.0-rc.18
+
+## 2.0.0-rc.17
+
+### Patch Changes
+
+- Updated dependencies [a40b6cd]
+- Updated dependencies [9f64ca9]
+- Updated dependencies [0222d68]
+- Updated dependencies [ee4963a]
+- Updated dependencies [5c0d190]
+- Updated dependencies [6cca8b5]
+  - @solidjs/web@2.0.0-rc.17
+
+## 2.0.0-rc.16
+
+### Patch Changes
+
+- 86cf504: `data-*` attributes type-check in props objects (`ComponentProps<"div">`, `JSX.HTMLAttributes<T>`), not only in JSX: a template-literal index signature on `ElementAttributes` (#4082).
+- Updated dependencies [3d8a8a9]
+- Updated dependencies [3cffd86]
+- Updated dependencies [86cf504]
+- Updated dependencies [4a99c84]
+- Updated dependencies [96b615d]
+- Updated dependencies [8092282]
+- Updated dependencies [8163bc3]
+- Updated dependencies [1bcee91]
+- Updated dependencies [47a217f]
+- Updated dependencies [7ad2342]
+- Updated dependencies [5bc0e5e]
+- Updated dependencies [2aa9e86]
+- Updated dependencies [9c8930c]
+- Updated dependencies [e4edd34]
+- Updated dependencies [10b3f55]
+- Updated dependencies [1f3b5b4]
+- Updated dependencies [ccd9948]
+- Updated dependencies [fda29a4]
+- Updated dependencies [0e0c043]
+- Updated dependencies [0a49dd8]
+- Updated dependencies [347f242]
+- Updated dependencies [c5da908]
+- Updated dependencies [b972757]
+- Updated dependencies [8e2590e]
+- Updated dependencies [8fbadfd]
+- Updated dependencies [e1bf2af]
+- Updated dependencies [e43e22f]
+- Updated dependencies [8e2446f]
+- Updated dependencies [7f8ab2d]
+- Updated dependencies [3f36f77]
+- Updated dependencies [8e2590e]
+- Updated dependencies [8bd7a5b]
+- Updated dependencies [9ac1481]
+- Updated dependencies [3e94215]
+- Updated dependencies [a61c929]
+- Updated dependencies [36039e2]
+- Updated dependencies [46db1cf]
+- Updated dependencies [3d8a8a9]
+- Updated dependencies [8d4a285]
+- Updated dependencies [8268cfd]
+  - @solidjs/web@2.0.0-rc.16
+
+## 2.0.0-rc.15
+
+### Patch Changes
+
+- a497d4b: Remove `state`, `noscroll`, `replace`, and `preload` from core anchor JSX types. They are not standard `<a>` attributes; a routing integration declares them by augmenting `AnchorHTMLAttributes`. `link` stays — it is the shared explicit-links opt-in, and the SSR claim bag already copies that name. Media and webview `preload` attributes are unchanged. Types only.
+- Updated dependencies [617d195]
+- Updated dependencies [56c309c]
+- Updated dependencies [a497d4b]
+- Updated dependencies [4afc662]
+- Updated dependencies [a14c18b]
+- Updated dependencies [372005f]
+- Updated dependencies [469733e]
+- Updated dependencies [43570f8]
+- Updated dependencies [1365d31]
+- Updated dependencies [06c7717]
+- Updated dependencies [abe12fc]
+- Updated dependencies [f64fcfe]
+- Updated dependencies [e5a4c8e]
+- Updated dependencies [6232d18]
+- Updated dependencies [3173a14]
+- Updated dependencies [5d75ed8]
+- Updated dependencies [86ac6da]
+- Updated dependencies [c2d4571]
+- Updated dependencies [49bed5c]
+- Updated dependencies [43570f8]
+- Updated dependencies [b749474]
+- Updated dependencies [234cfc9]
+- Updated dependencies [be845cb]
+- Updated dependencies [a26ee62]
+- Updated dependencies [22f942d]
+- Updated dependencies [39411bd]
+- Updated dependencies [234cfc9]
+  - @solidjs/web@2.0.0-rc.15
+
 ## 2.0.0-rc.14
 
 ### Patch Changes

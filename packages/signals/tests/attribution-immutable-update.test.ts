@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { attribution } from "../src/attribution.js";
-import { createStore, flush, reconcile, OBSERVE } from "../src/index.js";
+import { createStore, flush, markRaw, reconcile, OBSERVE } from "../src/index.js";
 import type { DiagnosticEvent } from "../src/core/dev.js";
 
 afterEach(() => {
@@ -102,6 +102,46 @@ describe("IMMUTABLE_UPDATE_IN_STORE", () => {
     expect(hits).toEqual([]);
   });
 
+  it("does not report an existing item shifted into a spliced-out index (#4262)", () => {
+    const hits = arm();
+    const [state, setState] = createStore({
+      items: [
+        { id: "a", product: "p1", name: "Pancakes", variant: "meat", quantity: 2 },
+        { id: "b", product: "p1", name: "Pancakes", variant: "cheese", quantity: 2 },
+        { id: "c", product: "p1", name: "Pancakes", variant: "plain", quantity: 2 }
+      ]
+    });
+    setState(s => {
+      s.items.splice(0, 1);
+    });
+    flush();
+    expect(state.items.map(i => i.id)).toEqual(["b", "c"]);
+    setState(s => {
+      const [first, second] = [s.items[0], s.items[1]];
+      s.items[0] = second;
+      s.items[1] = first;
+    });
+    flush();
+    expect(state.items.map(i => i.id)).toEqual(["c", "b"]);
+    expect(hits).toEqual([]);
+  });
+
+  it("still reports a spread copy assigned to an array index", () => {
+    const hits = arm();
+    const [, setState] = createStore({
+      items: [
+        { id: "a", product: "p1", name: "Pancakes", variant: "meat", quantity: 2 },
+        { id: "b", product: "p1", name: "Pancakes", variant: "cheese", quantity: 2 }
+      ]
+    });
+    setState(s => {
+      s.items[0] = { ...s.items[1], id: "a" };
+    });
+    flush();
+    expect(hits).toHaveLength(1);
+    expect(hits[0].message).toContain('"store.items.0" was replaced with a fresh object');
+  });
+
   it("does not report genuinely new data (nothing carried over)", () => {
     const hits = arm();
     const [, setState] = createStore<State>(initial());
@@ -133,5 +173,26 @@ describe("IMMUTABLE_UPDATE_IN_STORE", () => {
     flush();
     expect(hits).toHaveLength(1);
     expect(hits[0].data!.path).toBe("store.a.b");
+  });
+
+  it("does not report replacing a value in a shallow store (#4686)", () => {
+    const hits = arm();
+    const [, setStore] = createStore([{ a: 1, b: 2, c: 3 }], { shallow: true });
+    setStore(s => {
+      s[0] = { a: 1, b: 2, c: 4 };
+    });
+    flush();
+    expect(hits).toEqual([]);
+  });
+
+  it("does not report replacing a markRaw leaf (#4686)", () => {
+    const hits = arm();
+    const leaf = markRaw({ a: 1, b: 2, c: 3 });
+    const [, setStore] = createStore({ item: leaf });
+    setStore(s => {
+      s.item = { a: 1, b: 2, c: 4 };
+    });
+    flush();
+    expect(hits).toEqual([]);
   });
 });

@@ -38,6 +38,13 @@ export interface StoreOptions {
    * projection node carries the name itself.
    */
   name?: string;
+  /**
+   * Source location (`file:line:col`, root-relative) written by the
+   * compiler's `sourceNames` `locations` kind; dev and observe builds keep it
+   * for console reports and diagnostic events, production ignores it. Not
+   * meant to be written by hand.
+   */
+  loc?: string;
   /** Single-layer store: root keys reactive, values raw records replaced by reference */
   shallow?: boolean;
 }
@@ -66,10 +73,19 @@ export interface ProjectionOptions extends StoreOptions {
   seedLoadingValue?: boolean;
 }
 
+/** @internal */
 export type NoFn<T> = T extends Function ? never : T;
+/**
+ * Rejects array roots on the seedless derived form: a store's root shape is
+ * fixed when it is created, and `[]` is already a complete seed for an array.
+ * @internal
+ */
+export type NoArray<T> = Extract<T, readonly unknown[]> extends never ? unknown : never;
 
 /** Brand keys the proxy answers directly (never user data). */
 export const $TRACK = Symbol(__DEV__ ? "STORE_TRACK" : 0),
+  /** A store target's guess carrier (optimistic.ts, S2): one per lane. */
+  $PATCH = Symbol(__DEV__ ? "STORE_PATCH" : 0),
   $TARGET = Symbol(__DEV__ ? "STORE_TARGET" : 0),
   $PROXY = Symbol(__DEV__ ? "STORE_PROXY" : 0),
   $RECORD = Symbol(__DEV__ ? "VIEW_RECORD" : 0);
@@ -167,4 +183,14 @@ export function ownEnumerableKeys(o: object): (string | symbol)[] {
 export let writeOverride = false;
 export function setWriteOverride(value: boolean): void {
   writeOverride = value;
+}
+
+/** The list driver's view of a shallow store (map.ts): the backing a read of
+ * every slot serves this reader, or `undefined` when the list is no shallow
+ * store or a slot read could differ from it. Installed by store.ts's top
+ * level, so a `<For>` in an app without stores carries none of it; it lives
+ * beside `$TRACK` so map.ts reaches no other store module. */
+export let shallowView: ((t: any) => any[] | undefined) | null = null;
+export function installShallowView(view: (t: any) => any[] | undefined): void {
+  shallowView = view;
 }

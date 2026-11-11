@@ -11,7 +11,7 @@ This is a short, practical guide for migrating from Solid 1.x to Solid 2.0’s A
 - **Lifecycle**: `onMount` is replaced by `onSettled` (and it can return cleanup).
 - **Async UI**: use `<Loading>` for first readiness; use `isPending(() => expr)` for “a change is on the way” indicators (input-driven refetches and `affects()` declarations — a bare `refresh()` is silent).
 - **Lists**: `Index` is gone; use `<For keyed={false}>`. Default `For` receives raw items, while `keyed={false}` receives item accessors and a stable numeric index.
-- **Stores**: prefer draft-first setters; `storePath(...)` exists as an opt-in helper for the old path-style ergonomics.
+- **Stores**: setters are draft-first; 1.x path-argument setters become draft writes to the same path.
 - **Plain values**: `snapshot(store)` replaces `unwrap(store)` when you need a plain non-reactive value.
 - **DOM**: `/*@once*/` and `use:` directives are removed from the public JSX model; use normal reactive JSX, `untrack` for intentional one-time JavaScript reads, and `ref` directive factories (including array refs). Previously tolerated `class:` / `style:` namespace syntax is no longer special; use `class` / `style` object values.
 - **Refs**: ref callbacks are now unowned — `getOwner()` is `null` inside them, so 1.x-style `onCleanup()` registration inside a ref callback no longer works. Keep lifecycle work in an owned scope: `onSettled` in the component body, or the setup half of a directive factory.
@@ -36,7 +36,7 @@ import { render, hydrate } from "@solidjs/web";
 import { createStore } from "solid-js/store";
 
 // 2.0 (stores are exported from solid-js)
-import { createStore, reconcile, snapshot, storePath } from "solid-js";
+import { createStore, reconcile, snapshot } from "solid-js";
 ```
 
 ```ts
@@ -403,7 +403,7 @@ const addTodo = action(function* (todo) {
 
 ## Stores
 
-### Draft-first setters (and `storePath` as an opt-in helper)
+### Draft-first setters
 
 ```js
 // 2.0 preferred: produce-style draft updates
@@ -411,8 +411,8 @@ setStore(s => {
   s.user.address.city = "Paris";
 });
 
-// Optional compatibility: old “path argument” ergonomics via storePath
-setStore(storePath("user", "address", "city", "Paris"));
+// 1.x path setters become draft writes to the same path:
+// setStore("user", "address", "city", "Paris")  →  the update above
 ```
 
 ### `unwrap(store)` → `snapshot(store)`
@@ -463,7 +463,7 @@ const [items] = createStore(() => api.listItems(), []);
 
 const [cache] = createStore(
   draft => {
-    draft.total = items().length;
+    draft.total = items.length;
   },
   { total: 0 }
 );
@@ -579,6 +579,8 @@ Solid 2.0 aims to be more “what you write is what the platform sees”:
 - boolean attributes are presence/absence (`muted={true}` adds it, `muted={false}` removes it)
 - `attr:`, `bool:`, and `on:` namespaces are removed (you typically don’t need them)
 
+The compiler rejects the removed forms. Written on a native element, `on:`, `oncapture:`, `attr:`, `bool:`, `use:` and `classList` are compile errors, and the message names the 2.0 replacement. On components they are still ordinary prop names. `prop:` and the XML namespaces (`xlink:`, `xml:`, `xmlns:`) compile as before.
+
 ```jsx
 <video muted={true} />
 <video muted={false} />
@@ -598,7 +600,7 @@ Event handlers are camelCase only: `on` followed by an uppercase letter (`onClic
 
 A string value is now exactly the HTML inline-handler attribute (`<link rel="preload" onload="this.rel='stylesheet'">`). In development a function passed to a lowercase `on*` attribute warns with `LOWERCASE_EVENT_ATTRIBUTE`.
 
-`on:` and `oncapture:` are removed. Keep using camelCase event handlers like `onClick` for Solid-managed events. A leftover `on:click={fn}` is now a plain (namespaced) attribute and warns in development like a lowercase `on*` name. For native listener options, use a ref callback:
+`on:` and `oncapture:` are removed. Keep using camelCase event handlers like `onClick` for Solid-managed events. A leftover `on:click={fn}` on a native element is a compile error. Through a spread the compiler can't see it, so it becomes a plain (namespaced) attribute and warns in development like a lowercase `on*` name. For native listener options, use a ref callback:
 
 ```jsx
 const on = (type, handler, options) => el => el.addEventListener(type, handler, options);
@@ -742,6 +744,8 @@ const [todos, { addTodo }] = useContext(TodosContext);
 The default form `createContext<T>(defaultValue)` is unchanged — `useContext` falls back to `defaultValue` outside any Provider. Reserved for primitive fallbacks (theme, locale, frozen config); use the default-less form for any context carrying reactive state.
 
 If you genuinely relied on `useContext(ctx)` returning `undefined` for a default-less context, either pass an explicit default to `createContext` or wrap the call in a try/catch. Most existing wrapper hooks were already throwing on `undefined`, so for them the change is a removal, not a migration.
+
+`undefined` is never a context value: it means "not provided". `createContext<T | undefined>(undefined)` is still a default-less context, and a Provider passing `value={undefined}` counts as no Provider, so both throw `ContextNotFoundError` (in dev the message names the context and which case it hit). For an optional context, use `null` as the explicit empty value: `createContext<T | null>(null)` returns `null` outside a Provider, and a Provider can pass `null` too.
 
 ## New in 2.0
 
@@ -956,10 +960,18 @@ setStore(s => {
 });
 ```
 
-If you need the old path-style syntax, use `storePath`:
+A 1.x path setter maps onto a draft write to the same path — ranges and filters become loops, and setting `undefined` to remove a key becomes `delete`:
 
 ```js
-setStore(storePath("user", "name", "Alice"));
+// 1.x: setStore("user", "name", "Alice")
+setStore(s => {
+  s.user.name = "Alice";
+});
+
+// 1.x: setStore("todos", t => t.done, "archived", true)
+setStore(s => {
+  for (const t of s.todos) if (t.done) t.archived = true;
+});
 ```
 
 ### `createMutable` / `modifyMutable` → `createStore` with draft setters
@@ -982,24 +994,44 @@ setState(s => {
 
 The key difference: writes go through `setState`, which makes them visible to the reactive system's batching and transition coordination. Direct mutation on a proxy can't participate in transitions or optimistic rollback.
 
-### `from` / `observable` → async iterators / effects
+### `from` / `observable` → `from` returns an async iterable / effects
 
 `from` converted external reactive sources into signals. `observable` converted signals into observables. These directions have different replacements.
 
-**External → Solid (`from`):** Async iterables work directly in computations:
+**External → Solid (`from`):** `from(source)` now returns an async iterable, and async iterables are first-class in computations. Return it from a memo:
 
 ```js
 // 1.x
 import { from } from "solid-js";
 const signal = from(observable$);
 
-// 2.0 — async iterables are first-class in computations
+// 2.0 — from() adapts the source; the memo consumes it
+import { createMemo, from } from "solid-js";
+const value = createMemo(() => from(observable$));
+```
+
+`from` accepts a subscribe function (`(next, error, complete) => unsubscribe`; unlike 1.x's `set`, `next` stores what it's given, so a 1.x producer calling `set(prev => ...)` must compute the value itself), an Observable (anything with `subscribe(observer)`, including `Symbol.observable` / `"@@observable"` interop such as RxJS), or an async iterable. A subscription keeps only the latest value: values that arrive before the memo pulls again coalesce. A value the source emits during `subscribe` (a `BehaviorSubject`, say) shows on the first render, with no loading frame. An async iterable streams every value through. Errors reach the nearest `Errored` boundary.
+
+The source closes as soon as the memo re-runs (for example, when a source it reads changes), or when its owner is disposed. It doesn't wait for the new source's first value.
+
+Under SSR, `from` follows the memo's `ssrSource`:
+
+- **A subscription or Observable** counts as a live source: each value is the whole current state. With the default `ssrSource`, the server renders and serializes its first value, then unsubscribes. The client adopts that value while hydrating, then subscribes again once its section has hydrated. A source that never emits can't hold the response open. `"hybrid"` behaves the same on the server, but the client treats its first new value as a repeat of the server's and drops it, so use it only with a source that replays its current value on subscribe. With `"client"`, the server never subscribes.
+- **An async iterable** streams like any other: with the default `ssrSource`, the server renders the first value and streams the rest to the client until the source ends. A source that never ends keeps the response open until the client disconnects. Return a subscription instead, or use `"hybrid"` (the server takes one value) or `"client"`.
+
+Either way the server releases the source when it stops reading it, or when the render is disposed.
+
+An async iterable can also be consumed directly in an async generator:
+
+```js
 const value = createMemo(async function* () {
-  for await (const val of observable$) {
+  for await (const val of iterable) {
     yield val;
   }
 });
 ```
+
+Here cleanup is not immediate. When the owner is disposed, or a re-run replaces the stream, Solid calls the generator's `return()`, but a generator waiting at an `await` can't finish until that `await` settles. The source stays subscribed until it produces another value or ends. `from` is the exception, as long as the `for await` starts before the generator's first `await`: a `from(source)` iterated there still closes its source immediately on a re-run (`from(iterable)` calls the iterable's `return()` immediately; an async generator source still finishes its own pending `await` first, but its values no longer reach the memo). After an `await` the generator has no owner, so a `from` iterated there closes only when the loop ends, like any other source. Even so, prefer returning `from(source)` directly (read awaited inputs from an upstream memo) and doing transforms in a downstream memo (`createMemo(() => format(value()))`) rather than in the loop body: the loop may run once more after a re-run, as the closed source ends the loop.
 
 **Solid → External (`observable`):** There's no drop-in replacement. `observable()` produced a standard Observable that external libraries could subscribe to. In 2.0, use `createEffect` to push signal changes to an external subscriber:
 
@@ -1053,8 +1085,9 @@ If you need a standard Observable/AsyncIterable interface for external consumers
 - **`onError` / `catchError`** → `Errored` or effect `error` option
 - **`produce`** → now the default store setter behavior (draft-first)
 - **`createMutable` / `modifyMutable`** → use `createStore` with draft setters
-- **`from` / `observable`** → async iterators
-- **`createDeferred`** → removed; handle outside Solid
+- **`from`** → still exported, but returns an async iterable for a memo: `createMemo(() => from(source))`
+- **`observable`** → `createEffect` pushing to the external subscriber
+- **`createDeferred`** → same name, new meaning: an async memo that may lag but never leads (keeps its last answer while a refetch is in flight; `isPending` reports the refetch). 1.x's idle-time deferral and `timeoutMs` are gone; with a synchronous function it behaves like `createMemo`
 - **`indexArray`** → use `mapArray` with `keyed: false`
 - **`resetErrorBoundaries`** → no longer needed (error boundaries heal automatically)
 - **`enableScheduling`** → removed

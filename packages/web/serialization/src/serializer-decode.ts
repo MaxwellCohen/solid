@@ -292,17 +292,21 @@ export function resolveSerializerPlugins(customPlugins) {
 const jsonCodecDisabledFeatures = () => Feature.RegExp;
 const JSON_CODEC_DEPTH_LIMIT = 64;
 
+// A transport that has already resolved its COMPLETE plugin list hands it
+// over under this registered key, and it is used as given — the one way past
+// the composition with the defaults below. The server-function argument leg
+// uses it to decode with a narrower set than the defaults (see
+// server-functions/argument-codec.js). Deliberately not a `JSONCodecOptions`
+// field: integrations configure `plugins`.
+const RESOLVED_PLUGINS = Symbol.for("solid.codec.resolvedPlugins");
+
 // Single source of truth for codec defaults — encode and decode must agree
 // on plugins and feature policy or payloads won't roundtrip. The encode
 // half (serializer.js) imports this so one entry defines the contract.
-export function resolveCodecOptions({
-  plugins,
-  disabledFeatures,
-  depthLimit,
-  serializeErrorStacks
-}: JSONCodecOptions = {}) {
+export function resolveCodecOptions(options: JSONCodecOptions = {}) {
+  const { plugins, disabledFeatures, depthLimit, serializeErrorStacks } = options;
   return {
-    plugins: resolveSerializerPlugins(plugins),
+    plugins: options[RESOLVED_PLUGINS] || resolveSerializerPlugins(plugins),
     disabledFeatures:
       disabledFeatures === undefined ? jsonCodecDisabledFeatures() : disabledFeatures,
     depthLimit: depthLimit === undefined ? JSON_CODEC_DEPTH_LIMIT : depthLimit,
@@ -417,7 +421,16 @@ export function createJSONDeserializer(options) {
     const close = () => {
       alive = false;
     };
-    const off = stream.on({ next() {}, throw: close, return: close });
+    let off;
+    try {
+      off = stream.on({ next() {}, throw: close, return: close });
+    } catch {
+      // seroval 1.7: a single-consumer stream (`l: 1`, what a plugin's
+      // `parseStreamSource` mints, e.g. ReadableStreamPlugin) refuses a
+      // second `.on()` once its consumer subscribed ("Stream consumed").
+      // Its liveness is then only on the instance.
+      return (stream as any).alive !== false;
+    }
     if (typeof off === "function") off();
     return alive;
   }
