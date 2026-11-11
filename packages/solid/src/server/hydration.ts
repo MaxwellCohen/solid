@@ -735,7 +735,7 @@ function ssrLoadingBoundary(
     ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
     : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
   if (ctx.templateFor) {
-    tpl[0] = `<?start name=${id}>` + tpl[0];
+    tpl[0] = `<?start name="${id}">` + tpl[0];
     tpl[1] += "<?end>";
   }
   const fallbackResult = runWithOwner(fallbackOwner, () => {

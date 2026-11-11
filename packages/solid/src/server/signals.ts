@@ -4382,7 +4382,7 @@ export function createErrorBoundary<T, U>(
           // `templateFor` wraps the scaffold in its patching range.
           !(
             t.startsWith(`<template id="pl-${outcome}"`) ||
-            t.startsWith(`<?start name=${outcome}><template id="pl-${outcome}"`)
+            t.startsWith(`<?start name="${outcome}"><template id="pl-${outcome}"`)
           ) ||
           !(t.endsWith(`<!--pl-${outcome}-->`) || t.endsWith(`<!--pl-${outcome}--><?end>`)))
     )

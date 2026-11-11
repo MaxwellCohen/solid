@@ -2505,7 +2505,7 @@ export function hydrate(code, element, options = {}) {
       if (
         p &&
         (p.nodeType === 8
-          ? p.nodeValue === `?start name=${id}`
+          ? p.nodeValue === `?start name="${id}"`
           : p.nodeType === 7 && p.target === "start")
       )
         p.remove();

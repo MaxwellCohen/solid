@@ -55,7 +55,7 @@ function App(props: { inside: boolean }) {
 }
 
 const fragments = (rest: string) =>
-  [...rest.matchAll(/<template id="([^"]+)"(?: for=[^\s>]+)?( e)?>([\s\S]*?)<\/template>/g)].map(m => ({
+  [...rest.matchAll(/<template id="([^"]+)"(?: for="[^"]+")?( e)?>([\s\S]*?)<\/template>/g)].map(m => ({
     id: m[1],
     failed: !!m[2],
     html: m[3]
