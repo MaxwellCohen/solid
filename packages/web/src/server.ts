@@ -1659,6 +1659,13 @@ function isAttrName(prop: string): boolean {
 //   gate writes the template ahead of its links. The runtime's policy calls
 //   back into $dfr for swaps it approves, so the DOM mechanics exist exactly
 //   once.
+// - Native patching (`templateFor`): an eager fragment ships as
+//   `<template for>` inside a `<?start name>`…`<?end>` range, so a supporting
+//   browser has already swapped it (template and placeholder both gone) by
+//   the time `$df` runs; $dfr then only records the reveal. Without native
+//   support the same range is plain comments, which the raw swap removes
+//   along with the scaffold. $dfm matches either a comment or a real
+//   processing-instruction marker.
 // - $dfl(id): materialize fallback from `pl-*` template content without resolving.
 //   Marker misses queue in `_$HY.dlq`, same reasoning as $dfr.
 // - $dflj(ids): materialize fallback content for every id in the list.
@@ -1679,7 +1686,7 @@ function isAttrName(prop: string): boolean {
 //   this script installed a listener in the same document.
 // - $dfg(id): group-style gate check; reveals a waiting group once all style counts hit zero.
 // - $dfj(ids): reveal a group in registration order, waiting if any member still has pending styles.
-const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfr(e,n,o,t){if(!(n=document.getElementById(e)))return 0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;for(;o&&(8!==o.nodeType||o.nodeValue!=="pl-"+e);)t=o.nextSibling,o.remove(),o=t;t=o.parentNode,o.replaceWith(n.content),n.remove(),(_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;for(n=o.nextSibling;n;){if(8===n.nodeType&&n.nodeValue==="pl-"+e){o.parentNode&&o.parentNode.insertBefore(o.content.cloneNode(!0),n),o._$fl=1,$dfd();return 1}n=n.nextSibling}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0)`;
+const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k,e){return n&&(8==n.nodeType?n.nodeValue==="?"+k+(e?' name="'+e+'"':""):7==n.nodeType&&n.target===k&&(!e||n.data.indexOf('name="'+e+'"')>-1))}function $dfr(e,n,o,t,p){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(;o&&(8!==o.nodeType||o.nodeValue!=="pl-"+e);)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start",e)&&p.remove();$dfm(o.nextSibling,"end")&&o.nextSibling.remove();t=o.parentNode,o.replaceWith(n.content),n.remove(),(_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;for(n=o.nextSibling;n;){if(8===n.nodeType&&n.nodeValue==="pl-"+e){o.parentNode&&o.parentNode.insertBefore(o.content.cloneNode(!0),n),o._$fl=1,$dfd();return 1}n=n.nextSibling}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0)`;
 
 // Head patch runtime, emitted once alongside the first head-patch task:
 // - $dha(ops): apply patch ops to document.head — "t" sets the title (and
@@ -2342,7 +2349,13 @@ export function renderToStream(code, options = {}) {
           );
         }
       } else {
-        buffer.write(`<template id="${key}">${value}</template>`);
+        // Eager (ungrouped, link-free) fragments apply the moment the browser
+        // parses them, so with `templateFor` they carry `for` — native
+        // patching swaps them in with scripts disabled; `$df` below then only
+        // does the bookkeeping. Anything deferred stays a plain template.
+        buffer.write(
+          `<template id="${key}"${context.templateFor && !deferActivation ? ` for="${key}"` : ""}>${value}</template>`
+        );
         if (!deferActivation) {
           emitTask(`$df("${key}")`);
         }
@@ -2688,6 +2701,9 @@ export function renderToStream(code, options = {}) {
   sharedConfig.context = context = {
     async: true,
     nonce: options.nonce,
+    // Declarative patching (`<?start>`/`<template for>`) is the document face's
+    // wire format; frame streams have their own transport.
+    templateFor: !options.sink,
     // Which face this render is: a document (the default emission) or a
     // frame stream (`options.sink`). Read by the server runtime's dev check
     // on undeclared unbounded sources, which only a document render pays for.
@@ -6100,11 +6116,17 @@ function replacePlaceholder(html, key, value) {
   const marker = `<template id="pl-${key}">`;
   const close = `<!--pl-${key}-->`;
 
-  const first = html.indexOf(marker);
+  let first = html.indexOf(marker);
   if (first === -1) return html;
-  const last = html.indexOf(close, first + marker.length);
+  let last = html.indexOf(close, first + marker.length) + close.length;
+  // A `templateFor` scaffold is wrapped in its patching range.
+  const start = `<?start name="${key}">`;
+  if (first >= start.length && html.startsWith(start, first - start.length)) {
+    first -= start.length;
+    if (html.startsWith("<?end>", last)) last += 6;
+  }
 
-  return html.slice(0, first) + value + html.slice(last + close.length);
+  return html.slice(0, first) + value + html.slice(last);
 }
 
 function classListToObject(classList) {

@@ -1527,8 +1527,13 @@ function claimChildNodes(parent) {
 // its `<!--pl-X-->` end marker — is excluded from claim arrays but kept in
 // the DOM (see stripTextSeparators).
 function isPlaceholderScaffolding(node, t) {
+  // `templateFor` also wraps the scaffold in `<?start name>`…`<?end>` markers
+  // (comments, or processing instructions where supported).
+  if (t === 7) return node.target === "start" || node.target === "end";
   return t === 8
-    ? node.nodeValue.startsWith("pl-")
+    ? node.nodeValue.startsWith("pl-") ||
+        node.nodeValue === "?end" ||
+        node.nodeValue.startsWith("?start name=")
     : t === 1 && node.localName === "template" && node.id.startsWith("pl-");
 }
 
@@ -2383,6 +2388,17 @@ export function hydrate(code, element, options = {}) {
         node.remove();
         node = next;
       }
+      const p = tpl.previousSibling;
+      if (
+        p &&
+        (p.nodeType === 8
+          ? p.nodeValue === `?start name="${id}"`
+          : p.nodeType === 7 && p.target === "start")
+      )
+        p.remove();
+      const e = tpl.nextSibling;
+      if (e && (e.nodeType === 8 ? e.nodeValue === "?end" : e.nodeType === 7 && e.target === "end"))
+        e.remove();
       tpl.remove();
     }
   };
