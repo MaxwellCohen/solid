@@ -1,10 +1,11 @@
+// @vitest-environment jsdom
 // The inline `$df` runtime's two `templateFor` paths: a browser that already
 // patched natively (template + scaffold gone) and one without support (the
 // range is plain comments the raw swap must clean up).
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const src = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
 const SCRIPT = src.match(/const REPLACE_SCRIPT = `([^`]+)`/)![1];
 
 function boot() {
