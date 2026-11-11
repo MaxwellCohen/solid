@@ -157,6 +157,8 @@ import {
   resolveTx,
   inEffectCallback,
   effectCallbackEvent,
+  effectCallbackOwner,
+  setEffectCallback,
   ANY_EVENT,
   passTx,
   joinPassTx,
@@ -243,6 +245,9 @@ export const PRIMITIVE_IN_EFFECT_CALLBACK_MESSAGE =
   "[PRIMITIVE_IN_EFFECT_CALLBACK] Cannot create a memo, effect or root with no owner inside an effect callback. The effect " +
   "phase runs with no ambient owner, so a computation created here belongs to nobody: it is never disposed and never held. " +
   "Create it in the compute (a flow component owns its children), or parent it explicitly with runWithOwner.";
+export const PRIMITIVE_IN_REF_CALLBACK_MESSAGE =
+  "[PRIMITIVE_IN_EFFECT_CALLBACK] Cannot create a memo, effect or root inside a ref callback. A ref callback runs like " +
+  "a render effect's callback; create it in the factory that returns the ref (the component body).";
 /** Dev: the effect phase (render and user effects, their cleanups) runs with
  * no ambient owner, and a computation created there with none is outside
  * every owner and every hold (maintainer, 2026-10-01: ownerless only —
@@ -253,16 +258,19 @@ export const PRIMITIVE_IN_EFFECT_CALLBACK_MESSAGE =
 export function assertNotInEffectCallback(): void {
   if (
     inEffectCallback &&
-    context === null &&
+    context === effectCallbackOwner &&
     (effectCallbackEvent === ANY_EVENT || dispatchingEvent() === effectCallbackEvent)
   ) {
+    const message = context
+      ? PRIMITIVE_IN_REF_CALLBACK_MESSAGE
+      : PRIMITIVE_IN_EFFECT_CALLBACK_MESSAGE;
     emitDiagnostic({
       code: "PRIMITIVE_IN_EFFECT_CALLBACK",
       kind: "lifecycle",
       severity: "error",
-      message: PRIMITIVE_IN_EFFECT_CALLBACK_MESSAGE
+      message
     });
-    throw new Error(PRIMITIVE_IN_EFFECT_CALLBACK_MESSAGE);
+    throw new Error(message);
   }
 }
 export const REACTIVE_WRITE_IN_OWNED_SCOPE_SIGNAL_MESSAGE =
@@ -1933,6 +1941,38 @@ export function untrack<T>(fn: () => T, strictReadLabel?: string | false): T {
   }
 }
 
+/** Dev-only: inside a ref callback (`runRefCallback`). Its context is the
+ * creating pass's for reads, but it is no owned scope: a write, a refresh,
+ * an action call or `onFlush` there is the imperative work a ref does (an
+ * effect callback's), not a computation's. */
+export function inRefCallback(): boolean {
+  return inEffectCallback && context !== null && context === effectCallbackOwner;
+}
+
+/**
+ * Runs a ref callback (`@solidjs/web`'s compiled `ref()`) the way a render
+ * effect's callback runs on its first run at creation: untracked, in the
+ * current context — its reads are the pass's that builds the element, not
+ * the screen's (#4761) — and, in dev, a strict-read scope in which creating a
+ * primitive is PRIMITIVE_IN_EFFECT_CALLBACK. Work a ref sets up belongs in
+ * the factory that returns the callback (the component body).
+ *
+ * @internal
+ */
+export function runRefCallback(fn: () => void): void {
+  if (__DEV__) {
+    const prev = inEffectCallback,
+      prevEvent = effectCallbackEvent,
+      prevOwner = effectCallbackOwner;
+    setEffectCallback(true, ANY_EVENT, context);
+    try {
+      untrack(fn, "a ref callback");
+    } finally {
+      setEffectCallback(prev, prevEvent, prevOwner);
+    }
+  } else untrack(fn);
+}
+
 /**
  * Set while runtime bookkeeping reads a node inside another node's pass (a
  * loading boundary priming its tree at creation, from whatever pass is
@@ -2428,7 +2468,9 @@ export function read<T>(el: Signal<T> | Computed<T>): T {
       passLane !== null &&
       !((c as Computed<any> | null)?._statusFlags! & STATUS_UNINITIALIZED)
     )
-      committed = true;
+      // Lane work: served the committed value, unless it read a staging of
+      // the flush this pass (lanes.ts `laneServed`, F-2; S-57).
+      committed = laneServedHook!(c as Computed<any>, owner, true) as boolean;
   }
   if (owner._statusFlags & STATUS_PENDING && !committed) {
     // A reader landing on a pending node throws; an untracked read of an
@@ -2640,6 +2682,9 @@ function shadowRead<T>(el: Signal<T> | Computed<T>): T {
  * round (#3969: nor does it make a later lane read a re-derive, `enterLane`). */
 export function stagedRead(c: Computed<any>, el?: Signal<any> | Computed<any>): void {
   if (!((el as Computed<any> | undefined)?._statusFlags! & STATUS_UNINITIALIZED)) {
+    // Lane work this pass served the committed value of a flight now reads
+    // a staging of the flush (lanes.ts `laneServed`: it throws).
+    if (passLane !== null && c._flags & REACTIVE_FRAME_READ) laneServedHook!(c, null);
     c._flags |= REACTIVE_STAGED_READ;
     if (__TEST__) shadowExternalRaise(c, RAISE_FL);
     // A verdict reader's too when it is an effect, before the frame has a
@@ -2772,7 +2817,8 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     !(el._config & CONFIG_OWNED_WRITE) &&
     !(context && context._config & CONFIG_CHILDREN_FORBIDDEN) &&
     context &&
-    !disposalDepth
+    !disposalDepth &&
+    !inRefCallback()
   ) {
     emitDiagnostic({
       code: "REACTIVE_WRITE_IN_OWNED_SCOPE",
@@ -2993,7 +3039,8 @@ export function markRefresh(node: Computed<any>): void {
     context &&
     !((node._config ?? 0) & CONFIG_OWNED_WRITE) &&
     !(context._config & CONFIG_CHILDREN_FORBIDDEN) &&
-    !disposalDepth
+    !disposalDepth &&
+    !inRefCallback()
   ) {
     emitDiagnostic({
       code: "REACTIVE_WRITE_IN_OWNED_SCOPE",

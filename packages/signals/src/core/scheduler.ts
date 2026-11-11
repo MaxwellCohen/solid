@@ -91,8 +91,9 @@ export let lanesBlockedHook: ((t: Transaction) => boolean) | null = null;
 export let laneAdoptHook: ((r: Computed<any>) => boolean) | null = null;
 /** core.ts `frameRead` served lane work or a verdict reader a held node's
  * committed value (lanes.ts `laneServed`). */
-export let laneServedHook: ((c: Computed<any>, el: Signal<any> | Computed<any>) => void) | null =
-  null;
+export let laneServedHook:
+  | ((c: Computed<any>, el: Signal<any> | Computed<any> | null, flight?: true) => unknown)
+  | null = null;
 /** A guess was written (guesses.ts `optimisticWrite`): the arms only a guess
  * reaches (CONFIG_GUESS) — a build without `createOptimistic` or
  * `createOptimisticStore` never sets it, and its bundler folds them. */
@@ -784,11 +785,21 @@ export const ANY_EVENT = {};
  * handler dispatched synchronously from that phase (`el.focus()`) runs under
  * a different event and is not in it (#4235). */
 export let effectCallbackEvent: unknown = ANY_EVENT;
+/** Dev-only: the context a callback scope runs in — null for an effect
+ * callback, the creating pass's for a ref callback (`runRefCallback`, #4761).
+ * A primitive created in that context is created in the callback; one
+ * created by a computation the callback pulls is that computation's. */
+export let effectCallbackOwner: Owner | null = null;
 
-export function setEffectCallback(value: boolean, event: unknown = ANY_EVENT) {
+export function setEffectCallback(
+  value: boolean,
+  event: unknown = ANY_EVENT,
+  owner: Owner | null = null
+) {
   if (__DEV__) {
     inEffectCallback = value;
     effectCallbackEvent = event;
+    effectCallbackOwner = owner;
   }
 }
 
