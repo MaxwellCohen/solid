@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
+const src = readFileSync("src/server.ts", "utf8");
 const SCRIPT = src.match(/const REPLACE_SCRIPT = `([^`]+)`/)![1];
 
 function boot() {
@@ -48,5 +48,40 @@ describe("$df with templateFor ranges", () => {
     boot();
     (globalThis as any).$df("Y");
     expect(document.body.innerHTML).toBe("<b>ok</b>");
+  });
+
+  const SVG = "http://www.w3.org/2000/svg";
+  const MATH = "http://www.w3.org/1998/Math/MathML";
+
+  test("SVG placeholder: content is reparsed into the SVG namespace", () => {
+    document.body.innerHTML =
+      '<svg id="s"><template id="pl-S"></template><!--pl-S--></svg>' +
+      '<template id="S"><circle r="2"></circle><text>hi</text></template>';
+    boot();
+    (globalThis as any).$df("S");
+    const kids = [...document.getElementById("s")!.children];
+    expect(kids.map(k => k.localName)).toEqual(["circle", "text"]);
+    expect(kids.every(k => k.namespaceURI === SVG)).toBe(true);
+  });
+
+  test("MathML placeholder: content is reparsed into the MathML namespace", () => {
+    document.body.innerHTML =
+      '<math id="m"><template id="pl-M"></template><!--pl-M--></math>' +
+      '<template id="M"><mi>x</mi><mo>+</mo></template>';
+    boot();
+    (globalThis as any).$df("M");
+    const kids = [...document.getElementById("m")!.children];
+    expect(kids.map(k => k.localName)).toEqual(["mi", "mo"]);
+    expect(kids.every(k => k.namespaceURI === MATH)).toBe(true);
+  });
+
+  test("foreignObject placeholder keeps HTML content", () => {
+    document.body.innerHTML =
+      '<svg><foreignObject id="f"><template id="pl-F"></template><!--pl-F--></foreignObject></svg>' +
+      '<template id="F"><div>ok</div></template>';
+    boot();
+    (globalThis as any).$df("F");
+    const d = document.getElementById("f")!.firstElementChild!;
+    expect(d.namespaceURI).toBe("http://www.w3.org/1999/xhtml");
   });
 });
