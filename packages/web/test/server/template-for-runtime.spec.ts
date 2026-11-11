@@ -22,8 +22,8 @@ describe("$df with templateFor ranges", () => {
 
   test("no native support: comment range + scaffold are swapped out", () => {
     document.body.innerHTML =
-      '<p>a</p><!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--pl-X--><!--?end--><p>z</p>' +
-      '<template id="X" for="X"><b>done</b></template>';
+      '<p>a</p><!--?start name=X--><template id="pl-X"></template><i>wait</i><!--pl-X--><!--?end--><p>z</p>' +
+      '<template id="X" for=X><b>done</b></template>';
     const fe = boot();
     (globalThis as any).$df("X");
     expect(document.body.innerHTML).toBe("<p>a</p><b>done</b><p>z</p>");

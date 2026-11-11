@@ -32,9 +32,9 @@ const App = () => (
 describe("templateFor", () => {
   test("range placeholder, native template, $df fallback", async () => {
     const html = await render(App);
-    expect(html).toMatch(/<\?start name="([^"]+)"><template id="pl-\1">/);
+    expect(html).toMatch(/<\?start name=([^>\s]+)><template id="pl-\1">/);
     expect(html).toMatch(/<!--pl-([^>]+)--><\?end>/);
-    expect(html).toMatch(/<template id="([^"]+)" for="\1"><b[^>]*>done<\/b><\/template>/);
+    expect(html).toMatch(/<template id="([^"]+)" for=\1><b[^>]*>done<\/b><\/template>/);
     expect(html).toContain("$df(");
   });
 });
