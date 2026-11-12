@@ -1589,25 +1589,21 @@ function claimChildNodes(parent) {
 // the DOM (see stripTextSeparators).
 // A document stream also wraps the scaffold in a `<?start name>`…`<?end>`
 // range: processing instructions where the parser has them, comments
-// elsewhere.
+// elsewhere, and comments everywhere once the inline runtime has run
+// (`$dpi`).
 function isPlaceholderScaffolding(node, t) {
-  if (t === 8) {
-    const v = node.nodeValue;
-    return v.startsWith("pl-") || v.startsWith("?start") || v === "?end";
-  }
-  return t === 7 || (t === 1 && node.localName === "template" && node.id.startsWith("pl-"));
+  if (t === 1) return node.localName === "template" && node.id.startsWith("pl-");
+  const v = markerText(node);
+  return v.startsWith("pl-") || v.startsWith("?start") || v === "?end";
 }
 
-// One end of that range. The inline runtime turns the processing
-// instructions into nameless comments (`$dpi`), so the kind alone identifies
-// a marker; the scaffold it sits against says whose it is.
-function isRangeMarker(node, kind) {
-  return (
-    !!node &&
-    (node.nodeType === 7
-      ? node.target === kind
-      : node.nodeType === 8 && node.nodeValue.startsWith("?" + kind))
-  );
+// A comment's text — or, for a `<?start …>`/`<?end>` processing instruction,
+// the text of the comment it is elsewhere (`?start`, `?end`): the inline
+// runtime leaves comments without a name, so the kind is all a marker says.
+// "" for any other node.
+function markerText(node) {
+  const t = node.nodeType;
+  return t === 7 ? "?" + node.target : t === 8 ? node.nodeValue : "";
 }
 
 /**
@@ -2510,13 +2506,13 @@ export function hydrate(code, element, options = {}) {
       let depth = 0;
       for (let node = tpl.nextSibling, next; node; node = next) {
         next = node.nextSibling;
-        const end =
-          (node.nodeType === 8 && node.nodeValue === "pl-" + id) ||
-          (isRangeMarker(node, "start") ? !++depth : isRangeMarker(node, "end") && !depth--);
+        const v = markerText(node);
+        const end = v === "pl-" + id || (v === "?end" && !depth--);
+        if (v.startsWith("?start")) depth++;
         node.remove();
         if (end) break;
       }
-      isRangeMarker(start, "start") && start.remove();
+      start && markerText(start).startsWith("?start") && start.remove();
       tpl.remove();
     }
   };
