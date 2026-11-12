@@ -11,7 +11,7 @@ import vm from "node:vm";
  */
 export function hydrationRecordKeys(html: string): string[] {
   const sandbox: any = {
-    document: { getElementById: () => null, addEventListener() {} },
+    document: { getElementById: () => null, querySelectorAll: () => [], addEventListener() {} },
     _$HY: { r: {}, fe() {} }
   };
   sandbox.self = sandbox;

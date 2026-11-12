@@ -158,6 +158,8 @@ export type HydrationContext = {
   _loadingPhase?: boolean;
   /** True only in renderToStream — enables async data serialization and streaming. */
   async?: boolean;
+  /** Streaming placeholders are declarative-patching ranges (`renderToStream({ templateFor })`). */
+  templateFor?: boolean;
   /**
    * Frame renders only (DR-2 case 1, set by the frame sink): signal that an
    * async value settled without a serialization flush the sink could see —
@@ -191,13 +193,6 @@ export type HydrationContext = {
    * unmarked.
    */
   unsettled?: () => void;
-  /**
-   * Document streams only (`!options.sink`): emit Loading placeholders as
-   * `<?start name>`/`<?end>` ranges (and `for` on eager content templates)
-   * so a no-JS browser can patch natively. With JS, `$dpi` disarms the
-   * markers and `$df` owns the swap. Frame streams leave this unset.
-   */
-  templateFor?: boolean;
 };
 
 export const NoHydrateContext: Context<boolean> = {

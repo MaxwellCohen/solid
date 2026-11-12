@@ -41,7 +41,7 @@ const eventFor = (name: string) =>
 // first N script blocks (a stream the client has only partly received).
 function registry(html: string, upTo = Infinity) {
   const sandbox: any = {
-    document: { getElementById: () => null, addEventListener() {} },
+    document: { getElementById: () => null, querySelectorAll: () => [], addEventListener() {} },
     _$HY: { r: {}, fe() {} }
   };
   sandbox.self = sandbox;

@@ -727,17 +727,17 @@ function ssrLoadingBoundary(
 
   const fallbackOwner = createOwner({ id });
   // The placeholder wrapper around a streaming fallback (see `plainFallback`).
-  // With `templateFor`, the scaffold is a declarative-patching range so a
-  // no-JS browser can swap natively; collapsed fallbacks stay inside a
-  // nameless <template> until `$dfl` materializes them. Classic `pl-*`
-  // markers remain for frame streams.
-  const tpl = ctx.templateFor
-    ? collapseFallback
-      ? [`<?start name="${id}"><template>`, `</template><?end>`]
-      : [`<?start name="${id}">`, `<?end>`]
-    : collapseFallback
-      ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
-      : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
+  // With `templateFor` the whole scaffold is also a declarative-patching
+  // range (`<?start name>` … `<?end>`), so a browser that supports
+  // `<template for>` swaps the content in natively — no script needed. The
+  // range encloses the scaffold, so a swap (native or `$dfr`) removes it all.
+  const tpl = collapseFallback
+    ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
+    : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
+  if (ctx.templateFor) {
+    tpl[0] = `<?start name="${id}">` + tpl[0];
+    tpl[1] += "<?end>";
+  }
   const fallbackResult = runWithOwner(fallbackOwner, () => {
     if (!ctx.async || finalAtDiscovery) return fallback();
     return ctx.ssr(tpl, ctx.escape(fallback()));

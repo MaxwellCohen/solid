@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-// `$dpi` blanks `<?start name>` so native DPU cannot race; `$dfr` always
-// does a direct replace from the map (classic `pl-*` still works for frames).
+// The inline `$df` runtime over `templateFor` ranges. With scripts on it owns
+// every swap: `$dpi` blanks the start markers a native parser would patch
+// (processing instructions), and `$dfr` swaps the range itself — comments
+// where the parser has no processing instructions, which need no blanking.
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -14,34 +16,88 @@ function boot() {
   return fe;
 }
 
-describe("$df disarm PE runtime", () => {
+describe("$df with templateFor ranges", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
   });
 
-  test("disarm blanks names then $df swaps the range", () => {
+  test("no native support: comment range + scaffold are swapped out", () => {
     document.body.innerHTML =
-      '<p>a</p><!--?start name="X"--><i>wait</i><!--?end--><p>z</p>' +
+      '<p>a</p><!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--pl-X--><!--?end--><p>z</p>' +
       '<template id="X" for="X"><b>done</b></template>';
     const fe = boot();
-    expect((globalThis as any)._$HY.m.X).toBeTruthy();
-    expect(document.body.innerHTML).toContain('?start name=""');
     (globalThis as any).$df("X");
     expect(document.body.innerHTML).toBe("<p>a</p><b>done</b><p>z</p>");
     expect(fe).toHaveBeenCalledOnce();
     expect((globalThis as any)._$HY.v.X).toBe(1);
   });
 
-  test("idempotent when template already gone", () => {
-    document.body.innerHTML = "<p>a</p><b>done</b><p>z</p>";
+  // What a parser with processing instructions leaves: the markers as nodes
+  // of type 7 around the scaffold jsdom parsed.
+  function nativeRange(id: string, host: ParentNode = document.body) {
+    const pl = host.querySelector(`template[id="pl-${id}"]`)!;
+    let end: ChildNode = pl;
+    while (end.nodeType !== 8 || end.nodeValue !== "pl-" + id) end = end.nextSibling!;
+    const start = document.createProcessingInstruction("start", `name="${id}"`);
+    pl.before(start);
+    end.after(document.createProcessingInstruction("end", ""));
+    return start;
+  }
+
+  test("native markers: loading the runtime blanks the start, $df swaps the range", () => {
+    document.body.innerHTML =
+      '<p>a</p><template id="pl-X"></template><i>wait</i><!--pl-X--><p>z</p>' +
+      '<template id="X" for="X"><b>done</b></template>';
+    const start = nativeRange("X");
     const fe = boot();
-    (globalThis as any)._$HY.v = { X: 1 };
-    expect((globalThis as any).$df("X")).toBe(1);
+    // nameless: a `<template for="X">` parsed from here on has no target
+    expect(start.data).toBe("");
+    (globalThis as any).$df("X");
     expect(document.body.innerHTML).toBe("<p>a</p><b>done</b><p>z</p>");
-    expect(fe).not.toHaveBeenCalled();
+    expect(fe).toHaveBeenCalledWith("X", document.body);
+    expect((globalThis as any)._$HY.v.X).toBe(1);
   });
 
-  test("classic pl-* swap still works", () => {
+  test("a nested range is blanked before its content joins the document", () => {
+    document.body.innerHTML =
+      '<template id="pl-A"></template><i>wait</i><!--pl-A-->' +
+      '<template id="A" for="A"><section><template id="pl-B"></template><i>inner</i><!--pl-B--></section></template>';
+    nativeRange("A");
+    const inner = nativeRange("B", (document.getElementById("A") as HTMLTemplateElement).content);
+    boot();
+    // inert template content is not the document's: still named
+    expect(inner.data).toBe('name="B"');
+    let live: string | undefined;
+    (globalThis as any)._$HY.fe = () => (live = inner.data);
+    (globalThis as any).$df("A");
+    expect(inner.isConnected).toBe(true);
+    expect(live).toBe("");
+  });
+
+  test("a collapsed fallback's nested range is blanked as $dfl materializes it", () => {
+    document.body.innerHTML =
+      '<template id="pl-C"><section><template id="pl-D"></template><i>inner</i><!--pl-D--></section></template><!--pl-C-->';
+    nativeRange("C");
+    nativeRange("D", (document.getElementById("pl-C") as HTMLTemplateElement).content);
+    boot();
+    (globalThis as any).$dfl("C");
+    const inner = document.querySelector("section")!.firstChild as ProcessingInstruction;
+    expect(inner.nodeType).toBe(7);
+    expect(inner.data).toBe("");
+  });
+
+  test("patched natively all the same: $df records the reveal", () => {
+    document.body.innerHTML = "<p>a</p><b>done</b><p>z</p>";
+    const fe = boot();
+    (globalThis as any).$df("X");
+    expect(document.body.innerHTML).toBe("<p>a</p><b>done</b><p>z</p>");
+    expect(fe).toHaveBeenCalledWith("X");
+    // idempotent
+    (globalThis as any).$df("X");
+    expect(fe).toHaveBeenCalledOnce();
+  });
+
+  test("legacy swap without a range still works", () => {
     document.body.innerHTML =
       '<template id="pl-Y"></template><i>wait</i><!--pl-Y--><template id="Y"><b>ok</b></template>';
     boot();
@@ -49,20 +105,12 @@ describe("$df disarm PE runtime", () => {
     expect(document.body.innerHTML).toBe("<b>ok</b>");
   });
 
-  test("collapsed fallback materializes via $dfl", () => {
-    document.body.innerHTML = '<!--?start name="C"--><template><i>fb</i></template><!--?end-->';
-    boot();
-    (globalThis as any).$dfl("C");
-    expect(document.body.innerHTML).toContain("<i>fb</i>");
-    expect(document.body.innerHTML).not.toContain("<template>");
-  });
-
   const SVG = "http://www.w3.org/2000/svg";
   const MATH = "http://www.w3.org/1998/Math/MathML";
 
   test("SVG placeholder: content is reparsed into the SVG namespace", () => {
     document.body.innerHTML =
-      '<svg id="s"><!--?start name="S"--><!--?end--></svg>' +
+      '<svg id="s"><template id="pl-S"></template><!--pl-S--></svg>' +
       '<template id="S"><circle r="2"></circle><text>hi</text></template>';
     boot();
     (globalThis as any).$df("S");
@@ -73,7 +121,7 @@ describe("$df disarm PE runtime", () => {
 
   test("MathML placeholder: content is reparsed into the MathML namespace", () => {
     document.body.innerHTML =
-      '<math id="m"><!--?start name="M"--><!--?end--></math>' +
+      '<math id="m"><template id="pl-M"></template><!--pl-M--></math>' +
       '<template id="M"><mi>x</mi><mo>+</mo></template>';
     boot();
     (globalThis as any).$df("M");
@@ -84,7 +132,7 @@ describe("$df disarm PE runtime", () => {
 
   test("foreignObject placeholder keeps HTML content", () => {
     document.body.innerHTML =
-      '<svg><foreignObject id="f"><!--?start name="F"--><!--?end--></foreignObject></svg>' +
+      '<svg><foreignObject id="f"><template id="pl-F"></template><!--pl-F--></foreignObject></svg>' +
       '<template id="F"><div>ok</div></template>';
     boot();
     (globalThis as any).$df("F");

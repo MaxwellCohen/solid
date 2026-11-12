@@ -125,8 +125,7 @@ describe("#3750 Errored around a pending Loading", () => {
       errors
     );
     expect(renders).toBeGreaterThan(1);
-    const key =
-      /<\?start name="(\w+)">/.exec(html)?.[1] ?? /<template id="pl-(\w+)">/.exec(html)?.[1];
+    const key = /<template id="pl-(\w+)">/.exec(html)?.[1];
     expect(key).toBeDefined();
     expect(html.split(`<template id="${key}" for="${key}">`).length - 1).toBe(1);
     expect(html).toContain(`<template id="${key}" for="${key}">SESSION_READY</template>`);
