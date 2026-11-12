@@ -150,7 +150,7 @@ describe("C13 server half — the sink emits one sweep as one unit", () => {
       });
     });
     const sandbox: any = {
-      document: { getElementById: () => null, querySelectorAll: () => [], addEventListener() {} },
+      document: { getElementById: () => null, createTreeWalker: () => ({ nextNode: () => null }), addEventListener() {} },
       _$HY: { r: {}, fe() {} },
       ReadableStream,
       Promise,

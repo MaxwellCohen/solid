@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 // The inline `$df` runtime over `templateFor` ranges. With scripts on it owns
-// every swap: `$dpi` blanks the start markers a native parser would patch
-// (processing instructions), and `$dfr` swaps the range itself — comments
-// where the parser has no processing instructions, which need no blanking.
+// every swap: `$dpi` turns the markers a native parser would patch
+// (processing instructions) into comments, and `$dfr` swaps the range itself
+// — already comments where the parser has no processing instructions.
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -69,8 +69,9 @@ describe("$df with templateFor ranges", () => {
       '<template id="X" for="X"><b>done</b></template>';
     const start = native(document.body).X;
     const fe = boot();
-    // nameless: a `<template for="X">` parsed from here on has no target
-    expect(start.data).toBe("");
+    // a comment now: a `<template for="X">` parsed from here on has no target
+    expect(start.isConnected).toBe(false);
+    expect(document.body.innerHTML).toContain('<!--?start--><template id="pl-X">');
     (globalThis as any).$df("X");
     expect(document.body.innerHTML).toBe("<p>a</p><b>done</b><p>z</p>");
     expect(fe).toHaveBeenCalledWith("X", document.body);
@@ -83,13 +84,18 @@ describe("$df with templateFor ranges", () => {
       '<template id="A" for="A"><section><!--?start name="B"--><template id="pl-B"></template><i>inner</i><!--?end--></section></template>';
     const inner = native(document.body).B;
     boot();
-    // inert template content is not the document's: still named
-    expect(inner.data).toBe('name="B"');
-    let live: string | undefined;
-    (globalThis as any)._$HY.fe = () => (live = inner.data);
+    // inert template content is not the document's: still a named marker
+    expect(inner.parentNode).not.toBe(null);
+    let piInserted = false;
+    (globalThis as any)._$HY.fe = () =>
+      (piInserted = !!document.createTreeWalker(document.body, 64).nextNode());
     (globalThis as any).$df("A");
-    expect(inner.isConnected).toBe(true);
-    expect(live).toBe("");
+    // converted before the payload joined the document, never inserted as one
+    expect(piInserted).toBe(false);
+    expect(inner.parentNode).toBe(null);
+    expect(document.querySelector("section")!.innerHTML).toBe(
+      '<!--?start--><template id="pl-B"></template><i>inner</i><!--?end-->'
+    );
   });
 
   test("a collapsed fallback materializes inside its range, nested ranges blanked", () => {
@@ -99,10 +105,9 @@ describe("$df with templateFor ranges", () => {
     boot();
     (globalThis as any).$dfl("C");
     const section = document.querySelector("section")!;
-    expect(section.nextSibling!.nodeType).toBe(7);
-    const inner = section.firstChild as ProcessingInstruction;
-    expect(inner.nodeType).toBe(7);
-    expect(inner.data).toBe("");
+    expect(section.nextSibling!.nodeValue).toBe("?end");
+    expect(section.firstChild!.nodeType).toBe(8);
+    expect(section.firstChild!.nodeValue).toBe("?start");
   });
 
   test("patched natively all the same: $df records the reveal", () => {

@@ -1593,14 +1593,14 @@ function claimChildNodes(parent) {
 function isPlaceholderScaffolding(node, t) {
   if (t === 8) {
     const v = node.nodeValue;
-    return v.startsWith("pl-") || v.startsWith("?start ") || v === "?end";
+    return v.startsWith("pl-") || v.startsWith("?start") || v === "?end";
   }
   return t === 7 || (t === 1 && node.localName === "template" && node.id.startsWith("pl-"));
 }
 
-// One end of that range. The inline runtime blanks a start marker's name
-// (`$dpi`), so the kind alone identifies it; the scaffold it sits against
-// says whose it is.
+// One end of that range. The inline runtime turns the processing
+// instructions into nameless comments (`$dpi`), so the kind alone identifies
+// a marker; the scaffold it sits against says whose it is.
 function isRangeMarker(node, kind) {
   return (
     !!node &&

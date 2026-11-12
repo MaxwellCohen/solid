@@ -76,7 +76,7 @@ function templates(html: string) {
 /** Run a document's scripts as a browser would; the `_$HY.r` table after. */
 async function execute(html: string) {
   const sandbox: any = {
-    document: { getElementById: () => null, querySelectorAll: () => [], addEventListener() {} },
+    document: { getElementById: () => null, createTreeWalker: () => ({ nextNode: () => null }), addEventListener() {} },
     _$HY: { r: {}, fe() {} },
     ReadableStream,
     Promise,
