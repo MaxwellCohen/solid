@@ -55,11 +55,13 @@ function App(props: { inside: boolean }) {
 }
 
 const fragments = (rest: string) =>
-  [...rest.matchAll(/<template id="([^"]+)"( e)?>([\s\S]*?)<\/template>/g)].map(m => ({
-    id: m[1],
-    failed: !!m[2],
-    html: m[3]
-  }));
+  [...rest.matchAll(/<template id="([^"]+)"(?: for="[^"]+")?( e)?>([\s\S]*?)<\/template>/g)].map(
+    m => ({
+      id: m[1],
+      failed: !!m[2],
+      html: m[3]
+    })
+  );
 
 describe("#4316: a parked failure beside a nested fragment that settled first", () => {
   test("the Errored around the settled fragment draws its fallback in the enclosing one", async () => {
