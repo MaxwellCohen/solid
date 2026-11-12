@@ -1587,15 +1587,27 @@ function claimChildNodes(parent) {
 // A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
 // its `<!--pl-X-->` end marker — is excluded from claim arrays but kept in
 // the DOM (see stripTextSeparators).
+// A document stream also wraps the scaffold in a `<?start name>`…`<?end>`
+// range: processing instructions where the parser has them, comments
+// elsewhere.
 function isPlaceholderScaffolding(node, t) {
-  // `templateFor` also wraps the scaffold in `<?start name>`…`<?end>` markers
-  // (comments, or processing instructions where supported).
-  if (t === 7) return node.target === "start" || node.target === "end";
-  return t === 8
-    ? node.nodeValue.startsWith("pl-") ||
-        node.nodeValue === "?end" ||
-        node.nodeValue.startsWith("?start name=")
-    : t === 1 && node.localName === "template" && node.id.startsWith("pl-");
+  if (t === 8) {
+    const v = node.nodeValue;
+    return v.startsWith("pl-") || v.startsWith("?start ") || v === "?end";
+  }
+  return t === 7 || (t === 1 && node.localName === "template" && node.id.startsWith("pl-"));
+}
+
+// One end of that range. The inline runtime blanks a start marker's name
+// (`$dpi`), so the kind alone identifies it; the scaffold it sits against
+// says whose it is.
+function isRangeMarker(node, kind) {
+  return (
+    !!node &&
+    (node.nodeType === 7
+      ? node.target === kind
+      : node.nodeType === 8 && node.nodeValue.startsWith("?" + kind))
+  );
 }
 
 /**
@@ -2491,6 +2503,7 @@ export function hydrate(code, element, options = {}) {
   sharedConfig.cleanupFragment = id => {
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
+      const start = tpl.previousSibling;
       let node = tpl.nextSibling;
       while (node) {
         const next = node.nextSibling;
@@ -2501,17 +2514,8 @@ export function hydrate(code, element, options = {}) {
         node.remove();
         node = next;
       }
-      const p = tpl.previousSibling;
-      if (
-        p &&
-        (p.nodeType === 8
-          ? p.nodeValue === `?start name="${id}"`
-          : p.nodeType === 7 && p.target === "start")
-      )
-        p.remove();
-      const e = tpl.nextSibling;
-      if (e && (e.nodeType === 8 ? e.nodeValue === "?end" : e.nodeType === 7 && e.target === "end"))
-        e.remove();
+      isRangeMarker(start, "start") && start.remove();
+      isRangeMarker(tpl.nextSibling, "end") && tpl.nextSibling.remove();
       tpl.remove();
     }
   };
