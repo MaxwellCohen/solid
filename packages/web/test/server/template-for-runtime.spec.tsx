@@ -21,9 +21,9 @@ describe("$df with templateFor ranges", () => {
     document.body.innerHTML = "";
   });
 
-  test("no native support: comment range + scaffold are swapped out", () => {
+  test("no native support: the comment range is swapped out with its scaffold", () => {
     document.body.innerHTML =
-      '<p>a</p><!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--pl-X--><!--?end--><p>z</p>' +
+      '<p>a</p><!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--?end--><p>z</p>' +
       '<template id="X" for="X"><b>done</b></template>';
     const fe = boot();
     (globalThis as any).$df("X");
@@ -32,23 +32,42 @@ describe("$df with templateFor ranges", () => {
     expect((globalThis as any)._$HY.v.X).toBe(1);
   });
 
-  // What a parser with processing instructions leaves: the markers as nodes
-  // of type 7 around the scaffold jsdom parsed.
-  function nativeRange(id: string, host: ParentNode = document.body) {
-    const pl = host.querySelector(`template[id="pl-${id}"]`)!;
-    let end: ChildNode = pl;
-    while (end.nodeType !== 8 || end.nodeValue !== "pl-" + id) end = end.nextSibling!;
-    const start = document.createProcessingInstruction("start", `name="${id}"`);
-    pl.before(start);
-    end.after(document.createProcessingInstruction("end", ""));
-    return start;
+  test("a range nested in the fallback does not close the outer one", () => {
+    document.body.innerHTML =
+      '<!--?start name="A"--><template id="pl-A"></template><i>a</i>' +
+      '<!--?start name="B"--><template id="pl-B"></template><i>b</i><!--?end-->' +
+      "<u>tail</u><!--?end--><p>z</p>" +
+      '<template id="A" for="A"><b>done</b></template>';
+    boot();
+    (globalThis as any).$df("A");
+    expect(document.body.innerHTML).toBe("<b>done</b><p>z</p>");
+  });
+
+  // What a parser with processing instructions leaves: every marker comment
+  // under `root` (template contents included) as a node of type 7.
+  function native(root: ParentNode, out: Record<string, ProcessingInstruction> = {}) {
+    const walk = document.createTreeWalker(root, 128 | 1);
+    const comments: Comment[] = [];
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if (n.nodeType === 8) comments.push(n as Comment);
+      else if ((n as Element).localName === "template")
+        native((n as HTMLTemplateElement).content, out);
+    }
+    for (const c of comments) {
+      const m = /^\?(start|end)(?: name="([^"]+)")?$/.exec(c.data);
+      if (!m) continue;
+      const pi = document.createProcessingInstruction(m[1], m[2] ? `name="${m[2]}"` : "");
+      c.replaceWith(pi);
+      if (m[2]) out[m[2]] = pi;
+    }
+    return out;
   }
 
   test("native markers: loading the runtime blanks the start, $df swaps the range", () => {
     document.body.innerHTML =
-      '<p>a</p><template id="pl-X"></template><i>wait</i><!--pl-X--><p>z</p>' +
+      '<p>a</p><!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--?end--><p>z</p>' +
       '<template id="X" for="X"><b>done</b></template>';
-    const start = nativeRange("X");
+    const start = native(document.body).X;
     const fe = boot();
     // nameless: a `<template for="X">` parsed from here on has no target
     expect(start.data).toBe("");
@@ -60,10 +79,9 @@ describe("$df with templateFor ranges", () => {
 
   test("a nested range is blanked before its content joins the document", () => {
     document.body.innerHTML =
-      '<template id="pl-A"></template><i>wait</i><!--pl-A-->' +
-      '<template id="A" for="A"><section><template id="pl-B"></template><i>inner</i><!--pl-B--></section></template>';
-    nativeRange("A");
-    const inner = nativeRange("B", (document.getElementById("A") as HTMLTemplateElement).content);
+      '<!--?start name="A"--><template id="pl-A"></template><i>wait</i><!--?end-->' +
+      '<template id="A" for="A"><section><!--?start name="B"--><template id="pl-B"></template><i>inner</i><!--?end--></section></template>';
+    const inner = native(document.body).B;
     boot();
     // inert template content is not the document's: still named
     expect(inner.data).toBe('name="B"');
@@ -74,14 +92,15 @@ describe("$df with templateFor ranges", () => {
     expect(live).toBe("");
   });
 
-  test("a collapsed fallback's nested range is blanked as $dfl materializes it", () => {
+  test("a collapsed fallback materializes inside its range, nested ranges blanked", () => {
     document.body.innerHTML =
-      '<template id="pl-C"><section><template id="pl-D"></template><i>inner</i><!--pl-D--></section></template><!--pl-C-->';
-    nativeRange("C");
-    nativeRange("D", (document.getElementById("pl-C") as HTMLTemplateElement).content);
+      '<!--?start name="C"--><template id="pl-C"><section><!--?start name="D"--><template id="pl-D"></template><i>inner</i><!--?end--></section></template><!--?end-->';
+    native(document.body);
     boot();
     (globalThis as any).$dfl("C");
-    const inner = document.querySelector("section")!.firstChild as ProcessingInstruction;
+    const section = document.querySelector("section")!;
+    expect(section.nextSibling!.nodeType).toBe(7);
+    const inner = section.firstChild as ProcessingInstruction;
     expect(inner.nodeType).toBe(7);
     expect(inner.data).toBe("");
   });

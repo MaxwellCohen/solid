@@ -1723,8 +1723,12 @@ function isAttrName(prop: string): boolean {
 //   template) and over each payload before it is inserted ($dfr content,
 //   $dfl fallback), so a start marker is never live and named at once. Only a
 //   real processing instruction needs blanking; a parser without them leaves
-//   comments, which nothing patches. $dfm(node, kind) matches either shape,
-//   and the raw swap removes both markers with the scaffold.
+//   comments, which nothing patches. $dfm(node, kind) matches either shape.
+//   $dfx(placeholder, id) finds where a placeholder's range closes: the
+//   `<!--pl-X-->` comment of the plain scaffold (frame streams), or the
+//   `<?end>` that balances its `<?start>` — ranges nested in the fallback
+//   are siblings and carry their own pair. The raw swap removes the range
+//   with both markers.
 //   A fragment that was patched natively all the same (its template and
 //   placeholder both gone, no reveal on record) is recorded as revealed
 //   rather than dropped.
@@ -1752,7 +1756,7 @@ function isAttrName(prop: string): boolean {
 //   elements there); HTML integration points keep the HTML-parsed content.
 // - $dfg(id): group-style gate check; reveals a waiting group once all style counts hit zero.
 // - $dfj(ids): reveal a group in registration order, waiting if any member still has pending styles.
-const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dpi(r,t){for(t of r.querySelectorAll('template[id^="pl-"]'))(t=t.previousSibling)&&7==t.nodeType&&(t.data="")}function $dfn(t,n,c,f){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;c=document.createElementNS(t.namespaceURI,t.localName);c.innerHTML=n.innerHTML;f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(;o&&(8!==o.nodeType||o.nodeValue!=="pl-"+e);)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();$dfm(o.nextSibling,"end")&&o.nextSibling.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...c.childNodes]:1,o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;for(n=o.nextSibling;n;){if(8===n.nodeType&&n.nodeValue==="pl-"+e){o.parentNode&&($dpi(t=o.content.cloneNode(!0)),o.parentNode.insertBefore(t,n)),o._$fl=1,$dfd();return 1}n=n.nextSibling}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
+const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dfx(o,e,d){for(d=0;o=o.nextSibling;)if(8==o.nodeType&&o.nodeValue=="pl-"+e||($dfm(o,"start")?!++d:$dfm(o,"end")&&!d--))break;return o}function $dpi(r,t){for(t of r.querySelectorAll('template[id^="pl-"]'))(t=t.previousSibling)&&7==t.nodeType&&(t.data="")}function $dfn(t,n,c,f){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;c=document.createElementNS(t.namespaceURI,t.localName);c.innerHTML=n.innerHTML;f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(c=$dfx(o,e);o!=c;)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...c.childNodes]:1,o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;if(n=$dfx(o,e)){o.parentNode&&($dpi(t=o.content.cloneNode(!0)),o.parentNode.insertBefore(t,n)),o._$fl=1,$dfd();return 1}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
 
 // Head patch runtime, emitted once alongside the first head-patch task:
 // - $dha(ops): apply patch ops to document.head — "t" sets the title (and
@@ -6393,19 +6397,23 @@ function waitForFragments(registry, key) {
 
 function replacePlaceholder(html, key, value) {
   const marker = `<template id="pl-${key}">`;
-  const close = `<!--pl-${key}-->`;
-
-  let first = html.indexOf(marker);
+  const first = html.indexOf(marker);
   if (first === -1) return html;
-  let last = html.indexOf(close, first + marker.length) + close.length;
-  // A `templateFor` scaffold is wrapped in its patching range.
+  let at = first + marker.length;
+  // A `templateFor` scaffold is a patching range: it closes at the `<?end>`
+  // that balances its `<?start>`, past any range nested in the fallback.
   const start = `<?start name="${key}">`;
-  if (first >= start.length && html.startsWith(start, first - start.length)) {
-    first -= start.length;
-    if (html.startsWith("<?end>", last)) last += 6;
+  if (html.startsWith(start, first - start.length)) {
+    for (let depth = 0; ; at += 6) {
+      const end = html.indexOf("<?end>", at);
+      if (end === -1) return html;
+      for (let s = at; (s = html.indexOf("<?start ", s)) !== -1 && s < end; s += 8) depth++;
+      at = end;
+      if (!depth--) return html.slice(0, first - start.length) + value + html.slice(end + 6);
+    }
   }
-
-  return html.slice(0, first) + value + html.slice(last);
+  const close = `<!--pl-${key}-->`;
+  return html.slice(0, first) + value + html.slice(html.indexOf(close, at) + close.length);
 }
 
 function classListToObject(classList) {

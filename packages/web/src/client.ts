@@ -2504,18 +2504,19 @@ export function hydrate(code, element, options = {}) {
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
       const start = tpl.previousSibling;
-      let node = tpl.nextSibling;
-      while (node) {
-        const next = node.nextSibling;
-        if (node.nodeType === 8 && node.nodeValue === "pl-" + id) {
-          node.remove();
-          break;
-        }
+      // The range closes at its `<!--pl-X-->` comment, or (a document
+      // stream) at the `<?end>` that balances its `<?start>`: a range nested
+      // in the fallback is a sibling carrying its own pair.
+      let depth = 0;
+      for (let node = tpl.nextSibling, next; node; node = next) {
+        next = node.nextSibling;
+        const end =
+          (node.nodeType === 8 && node.nodeValue === "pl-" + id) ||
+          (isRangeMarker(node, "start") ? !++depth : isRangeMarker(node, "end") && !depth--);
         node.remove();
-        node = next;
+        if (end) break;
       }
       isRangeMarker(start, "start") && start.remove();
-      isRangeMarker(tpl.nextSibling, "end") && tpl.nextSibling.remove();
       tpl.remove();
     }
   };

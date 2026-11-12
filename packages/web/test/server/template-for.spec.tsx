@@ -33,8 +33,11 @@ const App = () => (
 describe("templateFor", () => {
   test("range placeholder, native template, $df fallback", async () => {
     const html = await render(App);
-    expect(html).toMatch(/<\?start name="([^"]+)"><template id="pl-\1">/);
-    expect(html).toMatch(/<!--pl-([^>]+)--><\?end>/);
+    // the range closes at `<?end>`: no `<!--pl-X-->` comment beside it
+    expect(html).toMatch(
+      /<\?start name="([^"]+)"><template id="pl-\1"><\/template><i[^>]*>wait<\/i><\?end>/
+    );
+    expect(html).not.toContain("<!--pl-");
     expect(html).toMatch(/<template id="([^"]+)" for="\1"><b[^>]*>done<\/b><\/template>/);
     expect(html).toContain("$df(");
   });
