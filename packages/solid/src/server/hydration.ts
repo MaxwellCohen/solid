@@ -727,9 +727,17 @@ function ssrLoadingBoundary(
 
   const fallbackOwner = createOwner({ id });
   // The placeholder wrapper around a streaming fallback (see `plainFallback`).
-  const tpl = collapseFallback
-    ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
-    : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
+  // With `templateFor`, the scaffold is a declarative-patching range so a
+  // no-JS browser can swap natively; collapsed fallbacks stay inside a
+  // nameless <template> until `$dfl` materializes them. Classic `pl-*`
+  // markers remain for frame streams.
+  const tpl = ctx.templateFor
+    ? collapseFallback
+      ? [`<?start name="${id}"><template>`, `</template><?end>`]
+      : [`<?start name="${id}">`, `<?end>`]
+    : collapseFallback
+      ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
+      : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
   const fallbackResult = runWithOwner(fallbackOwner, () => {
     if (!ctx.async || finalAtDiscovery) return fallback();
     return ctx.ssr(tpl, ctx.escape(fallback()));

@@ -111,9 +111,12 @@ function records(): Record[] {
   return seen;
 }
 
-/** The `<template id="pl-…">` placeholder ids in document order. */
-const placeholderIds = (html: string) =>
-  [...html.matchAll(/<template id="pl-([^"]+)"/g)].map(m => m[1]);
+/** Placeholder ids in document order (`<?start name>` or classic `pl-*`). */
+const placeholderIds = (html: string) => {
+  const starts = [...html.matchAll(/<\?start name="([^"]+)"/g)].map(m => m[1]);
+  if (starts.length) return starts;
+  return [...html.matchAll(/<template id="pl-([^"]+)"/g)].map(m => m[1]);
+};
 
 /** An async read that answers `value` after `ms`. */
 function Slow(props: { ms: number; value: string }): JSX.Element {

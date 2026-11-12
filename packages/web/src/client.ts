@@ -1538,13 +1538,13 @@ export function installHydrationRuntime() {
 
 // Drop the `<!--!$-->` text-hole separators the server emits so adjacent
 // text nodes stay individually claimable; the array is compacted in place.
-// A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
-// its `<!--pl-X-->` end marker — is excluded from the claim array but KEPT in
-// the DOM (the $df swap still needs it). While the boundary is pending its
-// fallback hydrates into the region between the two; counting the scaffolding
-// shifted every positional text claim, so the fallback's reactive text never
-// adopted the server node and updates appended beside it as permanent debris
-// (solidjs/solid#2936).
+// A pending boundary's placeholder scaffolding — classic `pl-*` markers, or
+// `<?start>`/`<?end>` (possibly name-blanked by `$dpi`) — is excluded from
+// the claim array but KEPT in the DOM (the $df swap still needs it). While
+// the boundary is pending its fallback hydrates into the region between the
+// two; counting the scaffolding shifted every positional text claim, so the
+// fallback's reactive text never adopted the server node and updates appended
+// beside it as permanent debris (solidjs/solid#2936).
 function stripTextSeparators(nodes) {
   let j = 0;
   for (let i = 0; i < nodes.length; i++) {
@@ -1584,13 +1584,15 @@ function claimChildNodes(parent) {
   return out;
 }
 
-// A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
-// its `<!--pl-X-->` end marker — is excluded from claim arrays but kept in
-// the DOM (see stripTextSeparators).
+// A pending boundary's placeholder scaffolding — classic `pl-*` markers, or
+// `<?start>`/`<?end>` PIs/comments (see stripTextSeparators).
 function isPlaceholderScaffolding(node, t) {
-  return t === 8
-    ? node.nodeValue.startsWith("pl-")
-    : t === 1 && node.localName === "template" && node.id.startsWith("pl-");
+  if (t === 8) {
+    const v = node.nodeValue;
+    return v.startsWith("pl-") || v === "?end" || v.startsWith("?start");
+  }
+  if (t === 7) return node.target === "start" || node.target === "end";
+  return t === 1 && node.localName === "template" && node.id.startsWith("pl-");
 }
 
 /**
@@ -2484,6 +2486,38 @@ export function hydrate(code, element, options = {}) {
   sharedConfig.gather = root => gatherHydratable(element, root);
   sharedConfig.loadModuleAssets = loadModuleAssets;
   sharedConfig.cleanupFragment = id => {
+    // Prefer the disarm map (blanked starts), then a still-named start, then classic pl-*.
+    let marker = globalThis._$HY?.m?.[id];
+    if (!marker) {
+      const walk = document.createTreeWalker(document, 192);
+      let n;
+      while ((n = walk.nextNode())) {
+        if (
+          n.nodeType === 8
+            ? n.nodeValue === `?start name="${id}"`
+            : n.nodeType === 7 && n.target === "start" && (n.data || "").includes(`name="${id}"`)
+        ) {
+          marker = n;
+          break;
+        }
+      }
+    }
+    if (marker) {
+      let node = marker.nextSibling;
+      while (node) {
+        const next = node.nextSibling;
+        const isEnd =
+          node.nodeType === 8
+            ? node.nodeValue === "?end" || node.nodeValue.startsWith("?end ")
+            : node.nodeType === 7 && node.target === "end";
+        node.remove();
+        if (isEnd) break;
+        node = next;
+      }
+      marker.remove();
+      if (globalThis._$HY?.m) delete globalThis._$HY.m[id];
+      return;
+    }
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
       let node = tpl.nextSibling;

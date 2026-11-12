@@ -191,6 +191,13 @@ export type HydrationContext = {
    * unmarked.
    */
   unsettled?: () => void;
+  /**
+   * Document streams only (`!options.sink`): emit Loading placeholders as
+   * `<?start name>`/`<?end>` ranges (and `for` on eager content templates)
+   * so a no-JS browser can patch natively. With JS, `$dpi` disarms the
+   * markers and `$df` owns the swap. Frame streams leave this unset.
+   */
+  templateFor?: boolean;
 };
 
 export const NoHydrateContext: Context<boolean> = {

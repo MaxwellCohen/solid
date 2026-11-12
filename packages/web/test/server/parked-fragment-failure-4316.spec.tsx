@@ -55,16 +55,21 @@ function App(props: { inside: boolean }) {
 }
 
 const fragments = (rest: string) =>
-  [...rest.matchAll(/<template id="([^"]+)"( e)?>([\s\S]*?)<\/template>/g)].map(m => ({
-    id: m[1],
-    failed: !!m[2],
-    html: m[3]
-  }));
+  [...rest.matchAll(/<template id="([^"]+)"(?: for="[^"]+")?( e)?>([\s\S]*?)<\/template>/g)].map(
+    m => ({
+      id: m[1],
+      failed: !!m[2],
+      html: m[3]
+    })
+  );
+
+const shellHasPlaceholder = (shell: string, id: string) =>
+  shell.includes(`<?start name="${id}">`) || shell.includes(`<template id="pl-${id}">`);
 
 describe("#4316: a parked failure beside a nested fragment that settled first", () => {
   test("the Errored around the settled fragment draws its fallback in the enclosing one", async () => {
     const { shell, rest } = await recordStream(() => <App inside={false} />, { onError() {} });
-    const outer = fragments(rest).find(f => shell.includes(`<template id="pl-${f.id}">`))!;
+    const outer = fragments(rest).find(f => shellHasPlaceholder(shell, f.id))!;
     expect(outer.failed).toBe(false);
     expect(outer.html).toContain("caught: <!--$-->no user 7<!--/--></h2>");
     expect(outer.html).not.toContain("<section");
@@ -73,7 +78,7 @@ describe("#4316: a parked failure beside a nested fragment that settled first", 
 
   test("an Errored inside the settled fragment: the enclosing fragment fails", async () => {
     const { shell, rest } = await recordStream(() => <App inside={true} />, { onError() {} });
-    const outer = fragments(rest).find(f => shell.includes(`<template id="pl-${f.id}">`))!;
+    const outer = fragments(rest).find(f => shellHasPlaceholder(shell, f.id))!;
     expect(outer.failed).toBe(true);
     expect(rest).not.toMatch(/<section[^>]*><\/section>/);
     expect(rest).toContain('new Error("no user 7")');

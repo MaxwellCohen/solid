@@ -66,7 +66,9 @@ const collectDocument = (code: () => any) =>
 /** Every `<template id=K>…</template>` of a document, by key. */
 function templates(html: string) {
   const out: Record<string, string> = {};
-  for (const m of html.matchAll(/<template id="([^"]+)"(?: e)?>([\s\S]*?)<\/template>/g))
+  for (const m of html.matchAll(
+    /<template id="([^"]+)"(?: for="[^"]+")?(?: e)?>([\s\S]*?)<\/template>/g
+  ))
     out[m[1]] = m[2];
   return out;
 }
