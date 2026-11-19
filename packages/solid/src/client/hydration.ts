@@ -3144,7 +3144,7 @@ function hydratedCreateLoadingBoundary<T, U>(
       // fallback itself if the frontier reaches this slot first.
       const pl = document.getElementById("pl-" + id) as any;
       if (pl) {
-        if (!pl._$fl && pl.content.firstChild) return undefined;
+        if (!pl._$fl && pl.content?.firstChild) return undefined;
         // The fallback sits inside the patching range, behind its start
         // marker (or, without ranges, the placeholder template). Tag its
         // first node with that start: a sibling's content reconciled in

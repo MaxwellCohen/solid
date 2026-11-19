@@ -37,7 +37,7 @@ function steps(container: HTMLElement, chunk: string, first: boolean): (() => vo
     if (first) container.innerHTML = stripped;
     else container.insertAdjacentHTML("beforeend", stripped);
     for (const t of container.querySelectorAll("template"))
-      for (const b of (t as HTMLTemplateElement).content.querySelectorAll("b"))
+      for (const b of (t as HTMLTemplateElement).content?.querySelectorAll("b") ?? [])
         (b as any).$server = true;
   };
   return [markup, ...scripts.map(s => () => (0, eval)(s))];
@@ -80,14 +80,16 @@ describe("held reveal fragments hydrate in place", () => {
             }
             await settle();
           }
-          const shown = [...container.querySelectorAll("b")];
-          const groups = order === "all" ? ORDERS.length - 1 : 1;
+          const svg = order === "svg";
+          const shown = [...container.querySelectorAll(svg ? "text" : "b")];
+          const groups = order === "all" ? ORDERS.length - 2 : 1;
           expect(shown.map(b => b.textContent)).toEqual(
             Array.from({ length: groups }, () => ["A", "B", "C"]).flat()
           );
-          // The swapped-in server nodes, claimed in place.
-          expect(shown.every(b => (b as any).$server)).toBe(true);
-          expect(container.querySelectorAll("i").length).toBe(0);
+          // The swapped-in server nodes, claimed in place. (The SVG swap
+          // reparses its payload into the SVG namespace: new nodes.)
+          if (!svg) expect(shown.every(b => (b as any).$server)).toBe(true);
+          expect(container.querySelectorAll(svg ? "desc" : "i").length).toBe(0);
           const diagnostics = [...warn.mock.calls, ...error.mock.calls].map(c => String(c[0]));
           expect(diagnostics).toEqual([]);
         } finally {

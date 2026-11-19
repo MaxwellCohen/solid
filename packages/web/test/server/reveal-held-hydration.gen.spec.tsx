@@ -15,7 +15,7 @@ for (const order of ORDERS) {
     const rest = chunks.join("");
     // every fragment ships as a `for` template
     expect(rest.match(/<template id="([^"]+)" for="\1">/g)?.length).toBe(
-      order === "all" ? 3 * (ORDERS.length - 1) : 3
+      order === "all" ? 3 * (ORDERS.length - 2) : 3
     );
     writeArtifact(`reveal-held-hydration-${order}`, { shell, chunks });
   });

@@ -14,7 +14,15 @@ import { createMemo, Loading, Reveal } from "solid-js";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-export const ORDERS = ["sequential", "collapsed", "together", "natural", "nested", "all"] as const;
+export const ORDERS = [
+  "sequential",
+  "collapsed",
+  "together",
+  "natural",
+  "nested",
+  "svg",
+  "all"
+] as const;
 export type Order = (typeof ORDERS)[number];
 
 function Read(props: { name: string; ms: number }) {
@@ -30,10 +38,24 @@ function Slot(props: { name: string; ms: number }) {
   );
 }
 
+// Inside <svg> the placeholder parses as an SVG element with no `content`.
+function SvgRead(props: { name: string; ms: number }) {
+  const value = createMemo(() => sleep(props.ms).then(() => props.name.toUpperCase()));
+  return <text>{value()}</text>;
+}
+
+function SvgSlot(props: { name: string; ms: number }) {
+  return (
+    <Loading fallback={<desc>{props.name}</desc>}>
+      <SvgRead name={props.name} ms={props.ms} />
+    </Loading>
+  );
+}
+
 export function createRevealApp(order: Order): () => any {
   if (order === "all") {
     // Every group on one page, releasing in the same batch.
-    const groups = ORDERS.filter(o => o !== "all").map(createRevealApp);
+    const groups = ORDERS.filter(o => o !== "all" && o !== "svg").map(createRevealApp);
     return () => groups.map(Group => <Group />);
   }
   return function App() {
@@ -42,6 +64,18 @@ export function createRevealApp(order: Order): () => any {
       <Slot name="b" ms={10} />,
       <Slot name="c" ms={20} />
     ];
+    if (order === "svg")
+      return (
+        <main>
+          <svg>
+            <Reveal>
+              <SvgSlot name="a" ms={30} />
+              <SvgSlot name="b" ms={10} />
+              <SvgSlot name="c" ms={20} />
+            </Reveal>
+          </svg>
+        </main>
+      );
     return (
       <main>
         {order === "nested" ? (
