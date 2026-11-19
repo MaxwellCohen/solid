@@ -113,7 +113,8 @@ describe("hydration parity harness — Errored outside a failing streamed Loadin
       // Shell: the Loading's fallback; the fragment: the Errored's fallback,
       // marked as a rejected fragment.
       expect(shell).toContain("[LOAD]");
-      if (shape === "text") expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e><\/template>/);
+      if (shape === "text")
+        expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e><\/template>/);
       else expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e>(<p[^>]*>)?\[ERR\]/);
     });
   }
