@@ -35,6 +35,17 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
   // belongs only to the slot whose marker matches. `a[]` can name a node that
   // user code moved out of this parent (or into another slot of it); every
   // anchor read and destructive op below checks before touching one.
+  // A streamed boundary still waiting on its fragment shows a fallback that
+  // sits inside its patching range, behind the range's start marker and
+  // placeholder template; hydration tags the fallback's first node with that
+  // start (`_$rs`). Content that belongs before the boundary goes before the
+  // whole range: inserted right before the fallback node, it would land
+  // inside the range, and the fragment's swap would take it out with the
+  // fallback.
+  const rangeAnchor = n => {
+    const start = n && n._$rs;
+    return start && start.parentNode === parentNode ? start : n;
+  };
   const isLive = n => {
     if (!n) return false;
     const tag = n[$$SLOT];
@@ -79,7 +90,7 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
       // can be an old node the replace below left waiting in place.
       let k = bEnd;
       while (k < bLength && !isLive(b[k])) k++;
-      const node = k < bLength ? b[k] : after;
+      const node = k < bLength ? rangeAnchor(b[k]) : after;
 
       while (bStart < bEnd) insert(b[bStart++], node);
       // remove
@@ -141,7 +152,7 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
           }
 
           if (sequence > index - bStart) {
-            const node = a[aStart];
+            const node = rangeAnchor(a[aStart]);
             while (bStart < index) insert(b[bStart++], node);
           } else {
             // `replaceChild` detaches the old node, which is placed again
