@@ -4379,8 +4379,13 @@ export function createErrorBoundary<T, U>(
       (outcome === true
         ? !inServerComponentScope(owner as unknown as SSROwner)
         : typeof t !== "string" ||
-          !t.startsWith(`<template id="pl-${outcome}"`) ||
-          !t.endsWith(`<!--pl-${outcome}-->`))
+          // The scaffold in either shape: `pl-*` template to `<!--pl-X-->`,
+          // or the `templateFor` patching range.
+          !(
+            (t.startsWith(`<template id="pl-${outcome}"`) && t.endsWith(`<!--pl-${outcome}-->`)) ||
+            (t.startsWith(`<?start name="${outcome}"><template id="pl-${outcome}"`) &&
+              t.endsWith("<?end>"))
+          ))
     )
       return undefined;
     return drawFallback(err, outcome, parentHandler);

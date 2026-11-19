@@ -1587,10 +1587,23 @@ function claimChildNodes(parent) {
 // A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
 // its `<!--pl-X-->` end marker — is excluded from claim arrays but kept in
 // the DOM (see stripTextSeparators).
+// A document stream also wraps the scaffold in a `<?start name>`…`<?end>`
+// range: processing instructions where the parser has them, comments
+// elsewhere, and comments everywhere once the inline runtime has run
+// (`$dpi`).
 function isPlaceholderScaffolding(node, t) {
-  return t === 8
-    ? node.nodeValue.startsWith("pl-")
-    : t === 1 && node.localName === "template" && node.id.startsWith("pl-");
+  if (t === 1) return node.localName === "template" && node.id.startsWith("pl-");
+  const v = markerText(node);
+  return v.startsWith("pl-") || v.startsWith("?start") || v === "?end";
+}
+
+// A comment's text — or, for a `<?start …>`/`<?end>` processing instruction,
+// the text of the comment it is elsewhere (`?start`, `?end`): the inline
+// runtime leaves comments without a name, so the kind is all a marker says.
+// "" for any other node.
+function markerText(node) {
+  const t = node.nodeType;
+  return t === 7 ? "?" + node.target : t === 8 ? node.nodeValue : "";
 }
 
 /**
@@ -2486,16 +2499,20 @@ export function hydrate(code, element, options = {}) {
   sharedConfig.cleanupFragment = id => {
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
-      let node = tpl.nextSibling;
-      while (node) {
-        const next = node.nextSibling;
-        if (node.nodeType === 8 && node.nodeValue === "pl-" + id) {
-          node.remove();
-          break;
-        }
+      const start = tpl.previousSibling;
+      // The range closes at its `<!--pl-X-->` comment, or (a document
+      // stream) at the `<?end>` that balances its `<?start>`: a range nested
+      // in the fallback is a sibling carrying its own pair.
+      let depth = 0;
+      for (let node = tpl.nextSibling, next; node; node = next) {
+        next = node.nextSibling;
+        const v = markerText(node);
+        const end = v === "pl-" + id || (v === "?end" && !depth--);
+        if (v.startsWith("?start")) depth++;
         node.remove();
-        node = next;
+        if (end) break;
       }
+      start && markerText(start).startsWith("?start") && start.remove();
       tpl.remove();
     }
   };

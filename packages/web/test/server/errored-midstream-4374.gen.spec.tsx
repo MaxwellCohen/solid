@@ -38,7 +38,7 @@ test("render errored-midstream-4374-text-after-element chunks", async () => {
 test("render errored-midstream-4374-zero-fallback chunks", async () => {
   const { App } = createTextAfterElementApp(0);
   const { shell, chunks } = await recordStream(() => <App />);
-  expect(shell).toMatch(/>0<!--pl-/);
+  expect(shell).toMatch(/>0<\?end>/);
   expect(chunks.join("")).toContain("<i _hk=");
   writeArtifact("errored-midstream-4374-zero-fallback", { shell, chunks });
 });

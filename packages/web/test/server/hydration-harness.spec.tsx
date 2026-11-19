@@ -113,8 +113,9 @@ describe("hydration parity harness — Errored outside a failing streamed Loadin
       // Shell: the Loading's fallback; the fragment: the Errored's fallback,
       // marked as a rejected fragment.
       expect(shell).toContain("[LOAD]");
-      if (shape === "text") expect(rest).toMatch(/<template id="[^"]+" e><\/template>/);
-      else expect(rest).toMatch(/<template id="[^"]+" e>(<p[^>]*>)?\[ERR\]/);
+      if (shape === "text")
+        expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e><\/template>/);
+      else expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e>(<p[^>]*>)?\[ERR\]/);
     });
   }
 });
@@ -173,7 +174,7 @@ describe("hydration parity harness — fragment failure parked in a pending frag
       if (o.late) {
         // Settled first, the enclosing fragment's markup is out: the inner
         // fragment rejects on its own, for the client to render.
-        expect(rest).toMatch(/<template id="[^"]+" e><\/template>/);
+        expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e><\/template>/);
         return;
       }
       // Never the blank region a parked failure used to settle as.
@@ -182,7 +183,7 @@ describe("hydration parity harness — fragment failure parked in a pending frag
         expect(rest).toContain(`caught: <!--$-->${o.B ? "no hint" : "no user 7"}<!--/--></h2>`);
       else if (o.caught)
         expect(rest).toContain(`outermost: <!--$-->${o.B ? "no hint" : "no user 7"}<!--/--></h3>`);
-      else expect(rest).toMatch(/<template id="[^"]+" e><\/template>/);
+      else expect(rest).toMatch(/<template id="([^"]+)"(?: for="\1")? e><\/template>/);
     });
   }
   test("a parked failure sends what its twin sends", () => {

@@ -75,7 +75,7 @@ describe("<Reveal> with a <For> of boundaries before a sibling boundary", () => 
     const full = await done;
 
     const keyOf = (content: string) =>
-      full.match(new RegExp(`<template id="(\\d+)"><div[^>]*>${content}`))![1];
+      full.match(new RegExp(`<template id="(\\d+)"(?: for="\\d+")?><div[^>]*>${content}`))![1];
     const activation = (key: string) => full.indexOf(`$dfj(["${key}"])`);
     const [ka, kb, kt] = [keyOf("row-a"), keyOf("row-b"), keyOf("tail-content")];
     expect(activation(ka)).toBeGreaterThan(-1);

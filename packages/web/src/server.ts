@@ -1712,6 +1712,30 @@ function isAttrName(prop: string): boolean {
 //   gate writes the template ahead of its links. The runtime's policy calls
 //   back into $dfr for swaps it approves, so the DOM mechanics exist exactly
 //   once.
+// - Progressive enhancement (`templateFor`): the placeholder scaffold sits in
+//   a `<?start name>`…`<?end>` range and an eager fragment ships as
+//   `<template for>`, so with scripts off a supporting browser patches the
+//   range as it parses. With scripts on, this runtime owns every swap:
+//   $dpi(root) replaces each `<?start>`/`<?end>` processing instruction
+//   under `root` with the comment a parser without them would have left
+//   (`<!--?start-->`, `<!--?end-->`). A comment is not a patch target, so
+//   the `for` template parses as a plain template and waits for $dfr like
+//   any other. $dpi runs over the document when this script loads (the sink
+//   flushes it ahead of the first `for` template) and over each payload
+//   before it is inserted ($dfr content, $dfl fallback), so no named start
+//   marker is ever live. Converting a payload's markers first matters for
+//   speed as well: Chromium inserts a processing instruction into a
+//   document far slower than a comment, and slower the larger the page (500
+//   boundaries each revealing a nested one: 210 ms of swaps against 9 ms).
+//   $dfm(node, kind) matches a marker in either shape.
+//   $dfx(placeholder, id) finds where a placeholder's range closes: the
+//   `<!--pl-X-->` comment of the plain scaffold (frame streams), or the
+//   `<?end>` that balances its `<?start>` — ranges nested in the fallback
+//   are siblings and carry their own pair. The raw swap removes the range
+//   with both markers.
+//   A fragment that was patched natively all the same (its template and
+//   placeholder both gone, no reveal on record) is recorded as revealed
+//   rather than dropped.
 // - $dfl(id): materialize fallback from `pl-*` template content without resolving.
 //   Marker misses queue in `_$HY.dlq`, same reasoning as $dfr.
 // - $dflj(ids): materialize fallback content for every id in the list.
@@ -1730,9 +1754,13 @@ function isAttrName(prop: string): boolean {
 //   bubbles), installed by this script, which runs before any gated link is
 //   parsed. A link is counted once, even if more than one render's copy of
 //   this script installed a listener in the same document.
+// - $dfn(parent, template): the template's content as nodes of `parent`'s
+//   namespace — reparsed through a same-namespace element when the placeholder
+//   sits inside <svg>/<math> (HTML-parsed template content would be HTML
+//   elements there); HTML integration points keep the HTML-parsed content.
 // - $dfg(id): group-style gate check; reveals a waiting group once all style counts hit zero.
 // - $dfj(ids): reveal a group in registration order, waiting if any member still has pending styles.
-const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfr(e,n,o,t){if(!(n=document.getElementById(e)))return 0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;for(;o&&(8!==o.nodeType||o.nodeValue!=="pl-"+e);)t=o.nextSibling,o.remove(),o=t;t=o.parentNode,(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...n.content.childNodes]:1,o.replaceWith(n.content),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;for(n=o.nextSibling;n;){if(8===n.nodeType&&n.nodeValue==="pl-"+e){o.parentNode&&o.parentNode.insertBefore(o.content.cloneNode(!0),n),o._$fl=1,$dfd();return 1}n=n.nextSibling}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0)`;
+const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dfx(o,e,d){for(d=0;o=o.nextSibling;)if(8==o.nodeType&&o.nodeValue=="pl-"+e||($dfm(o,"start")?!++d:$dfm(o,"end")&&!d--))break;return o}function $dpi(r,t,w,a){for(w=document.createTreeWalker(r,64),a=[];t=w.nextNode();)/^(start|end)$/.test(t.target)&&a.push(t);for(t of a)t.replaceWith(document.createComment("?"+t.target))}function $dfn(t,n,c,f){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;c=document.createElementNS(t.namespaceURI,t.localName);c.innerHTML=n.innerHTML;f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(c=$dfx(o,e);o!=c;)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...c.childNodes]:1,o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;if(n=$dfx(o,e)){o.parentNode&&($dpi(t=o.content.cloneNode(!0)),o.parentNode.insertBefore(t,n)),o._$fl=1,$dfd();return 1}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
 
 // Head patch runtime, emitted once alongside the first head-patch task:
 // - $dha(ops): apply patch ops to document.head — "t" sets the title (and
@@ -2548,6 +2576,47 @@ export function renderToStream(code, options = {}) {
           );
         }
       } else {
+        // Link-free fragments carry `for` with `templateFor`, so a browser
+        // with scripts disabled patches them in as it parses. A rejected
+        // one patches in the outcome it rendered (a server <Errored>'s
+        // fallback); with scripts on the markers are disarmed, so its swap
+        // still runs scripted and lists the inserted nodes. One with no
+        // outcome (empty: the client renders the failure) stays plain, and
+        // without scripts its fallback stays up. (A `for` template
+        // goes out through `writeNative`, which puts the runtime ahead of
+        // the first one when scripts are on.)
+        //
+        // Reveal-grouped fragments are patchable too, but only once their
+        // group releases them: a native patch cannot wait for a frontier, so
+        // the server holds the template (and the `<key>_fr` settle that
+        // announces it) until `reveal()`, and writes it there as a `for`
+        // template, in reveal order. A fragment nested inside content that
+        // has not gone out yet waits behind it the same way: its patch
+        // target only exists once the enclosing patch has landed.
+        const waiting = waitingOn.get(key);
+        if (waiting) waitingOn.delete(key);
+        if (context.templateFor && meta.settle && (!meta.error || value)) {
+          const entry = {
+            key,
+            tpl: tpl.replace(`<template id="${key}"`, `$& for="${key}"`),
+            plain: tpl,
+            settle: meta.settle,
+            task: !deferActivation,
+            revealed: !deferActivation,
+            deps: waiting ? waiting.deps : []
+          };
+          const ancestor = unwrittenAncestor(key);
+          if (deferActivation || ancestor) {
+            unwritten.set(key, entry);
+            if (ancestor && entry.revealed) ancestor.deps.push(entry);
+            return true;
+          }
+          writeNative(entry.tpl);
+          emitTask(`$df("${key}")`);
+          // Settled by the caller; what waited on this content follows it.
+          flushDeps(entry);
+          return;
+        }
         buffer.write(tpl);
         if (!deferActivation) {
           emitTask(`$df("${key}")`);
@@ -2555,9 +2624,59 @@ export function renderToStream(code, options = {}) {
       }
     },
     // Reveal a set of fragments (registration order). Document behavior:
-    // $dfj task, or $dflj to materialize fallback content instead.
+    // $dfj task, or $dflj to materialize fallback content instead. With
+    // `templateFor`, held fragments go out here as `for` templates, ahead of
+    // their activation, and a collapsed slot's fallback goes out as a patch
+    // that re-opens the range, so a later content patch still finds it.
     reveal(keys, meta) {
-      emitTask(`${meta.fallback ? "$dflj" : "$dfj"}(${JSON.stringify(keys)})`);
+      if (meta.fallback) {
+        emitTask(`$dflj(${JSON.stringify(keys)})`);
+        for (const key of keys) {
+          const fallback = collapsedFallbacks.get(key);
+          if (!fallback) continue;
+          collapsedFallbacks.delete(key);
+          const html = fallback();
+          if (html === undefined) continue;
+          const entry = {
+            tpl: `<template for="${key}"><?start name="${key}">${html}<?end></template>`,
+            slot: key,
+            deps: []
+          };
+          const ancestor = unwrittenAncestor(key, true);
+          ancestor ? ancestor.deps.push(entry) : commitNative(entry);
+        }
+        return;
+      }
+      const now = [];
+      const live = [];
+      for (const key of keys) {
+        const entry = unwritten.get(key);
+        if (!entry) {
+          live.push(key);
+          continue;
+        }
+        if (entry.revealed) continue;
+        entry.revealed = true;
+        const ancestor = unwrittenAncestor(key);
+        if (ancestor) {
+          // Its placeholder is not in the document yet: activate it on its
+          // own once the enclosing content lands.
+          entry.task = true;
+          ancestor.deps.push(entry);
+        } else {
+          now.push(entry);
+          live.push(key);
+        }
+      }
+      for (const entry of now) {
+        unwritten.delete(entry.key);
+        writeNative(entry.tpl);
+      }
+      if (live.length) emitTask(`$dfj(${JSON.stringify(live)})`);
+      for (const entry of now) {
+        entry.settle();
+        flushDeps(entry);
+      }
     },
     // A late-registered asset while streaming. Document behavior: style links
     // are handled per-fragment (see fragment()); modules preload immediately;
@@ -2676,6 +2795,7 @@ export function renderToStream(code, options = {}) {
   // no shell. Both consumers' flush loops call this again once they resolve.
   const flushEnd = () => {
     if (!registry.size && !holds && !rootHoles) {
+      releaseUnwritten();
       serializeRootAssets();
       queue(() =>
         queue(() => {
@@ -2899,6 +3019,81 @@ export function renderToStream(code, options = {}) {
   let scriptFlushed = false;
   let headStyles;
   const revealGroups = new Map();
+  // `templateFor` patches not yet written (see the sink's fragment()):
+  // reveal-grouped fragments awaiting their group, and anything nested in
+  // content still held. Insertion order is stream order.
+  const unwritten = new Map();
+  // A collapsed slot's plain fallback markup, for the patch that shows it.
+  const collapsedFallbacks = new Map();
+  // Patches waiting on a fragment that has not settled yet (a collapsed
+  // slot's fallback inside a pending boundary), keyed by that fragment.
+  const waitingOn = new Map();
+  // Before the shell is out nothing can be written after it: patches wait.
+  let beforeShell = null;
+  // What a patch for `key` has to go out after, if anything: the closest
+  // enclosing fragment whose content is not in the stream yet — held here,
+  // or still pending (its placeholder for `key` is not in the document).
+  const unwrittenAncestor = (key, pending) => {
+    let found;
+    let at = 0;
+    for (const [k, entry] of unwritten)
+      if (k.length < key.length && k.length > at && key.startsWith(k))
+        ((found = entry), (at = k.length));
+    if (pending)
+      for (const k of registry.keys())
+        if (k.length < key.length && k.length > at && key.startsWith(k)) {
+          let holder = waitingOn.get(k);
+          if (!holder) waitingOn.set(k, (holder = { deps: [] }));
+          ((found = holder), (at = k.length));
+        }
+    if (!found && !firstFlushed) found = beforeShell ||= { deps: [] };
+    return found;
+  };
+  // With scripts on, `$df` owns the swap: the runtime has to load — and
+  // `$dpi` blank the start markers already parsed — before the first `for`
+  // template reaches the parser, or the browser patches that fragment ahead
+  // of the reveal policy. Its own script, so the tasks already queued still
+  // land with the template they belong to.
+  const writeNative = tpl => {
+    if (!scriptFlushed && !noScripts) {
+      scriptFlushed = true;
+      buffer.write(`<script${nonceAttr(nonce, "script")}>${REPLACE_SCRIPT}</script>`);
+    }
+    buffer.write(tpl);
+  };
+  const commitNative = entry => {
+    // A fallback patch held for the shell whose slot settled in the
+    // meantime: its content was inlined, there is no fallback to show.
+    if (entry.slot && !firstFlushed && !registry.has(entry.slot)) return;
+    if (entry.key) unwritten.delete(entry.key);
+    writeNative(entry.tpl);
+    if (entry.task) emitTask(`$df("${entry.key}")`);
+    entry.settle && entry.settle();
+    flushDeps(entry);
+  };
+  const flushDeps = entry => {
+    const deps = entry.deps;
+    entry.deps = [];
+    for (const dep of deps) commitNative(dep);
+  };
+  // The render is complete with patches still held: their group can no
+  // longer release them (its slots all settled), so they go out as plain
+  // templates — what the client would have had all along — and settle.
+  const releaseUnwritten = () => {
+    if (!unwritten.size) return;
+    const entries = [...unwritten.values()];
+    unwritten.clear();
+    const released = new Set();
+    const release = entry => {
+      if (released.has(entry)) return;
+      released.add(entry);
+      if (entry.plain) buffer.write(entry.plain);
+      entry.settle && entry.settle();
+      for (const dep of entry.deps) release(dep);
+      entry.deps = [];
+    };
+    for (const entry of entries) release(entry);
+  };
   let timer = null;
   const emitTask = task => {
     pushTask(`${task}${!scriptFlushed ? ";" + REPLACE_SCRIPT : ""}`);
@@ -2952,6 +3147,9 @@ export function renderToStream(code, options = {}) {
   sharedConfig.context = context = {
     async: true,
     nonce: options.nonce,
+    // Declarative patching (`<?start>`/`<template for>`) is the document face's
+    // wire format; frame streams have their own transport.
+    templateFor: !options.sink,
     // Which face this render is: a document (the default emission) or a
     // frame stream (`options.sink`). Read by the server runtime's dev check
     // on undeclared unbounded sources, which only a document render pays for.
@@ -3095,6 +3293,8 @@ export function renderToStream(code, options = {}) {
     ssr: ssr,
     registerFragment(key, options) {
       const revealGroup = options && options.revealGroup;
+      if (context.templateFor && options && options.fallback)
+        collapsedFallbacks.set(key, options.fallback);
       if (revealGroup) {
         let group = revealGroups.get(revealGroup);
         if (!group) {
@@ -3232,10 +3432,19 @@ export function renderToStream(code, options = {}) {
                   revealGroup,
                   error: error
                     ? ssrSanitizeError(error, null, undefined, undefined, errorScope)
-                    : error
+                    : error,
+                  // A sink that holds the fragment back (a `templateFor`
+                  // patch waiting on its reveal group, or on the content it
+                  // is nested in) settles it when the template goes out, so
+                  // the client never reads a settled fragment whose template
+                  // is not in the document.
+                  settle: () => item.resolve(error)
                 }
-              );
-              item.resolve(error);
+              ) !== true
+                ? item.resolve(error)
+                : // The completion check still runs: a fragment whose group
+                  // never releases it goes out at the end (releaseUnwritten).
+                  queue(() => queue(() => queue(flushEnd)));
             }
           }
         }
@@ -3465,6 +3674,11 @@ export function renderToStream(code, options = {}) {
       head
     });
     tasks = "";
+    if (beforeShell) {
+      const held = beforeShell;
+      beforeShell = null;
+      flushDeps(held);
+    }
     onCompleteShell &&
       onCompleteShell({
         write(v) {
@@ -6355,13 +6569,23 @@ function waitForFragments(registry, key) {
 
 function replacePlaceholder(html, key, value) {
   const marker = `<template id="pl-${key}">`;
-  const close = `<!--pl-${key}-->`;
-
   const first = html.indexOf(marker);
   if (first === -1) return html;
-  const last = html.indexOf(close, first + marker.length);
-
-  return html.slice(0, first) + value + html.slice(last + close.length);
+  let at = first + marker.length;
+  // A `templateFor` scaffold is a patching range: it closes at the `<?end>`
+  // that balances its `<?start>`, past any range nested in the fallback.
+  const start = `<?start name="${key}">`;
+  if (html.startsWith(start, first - start.length)) {
+    for (let depth = 0; ; at += 6) {
+      const end = html.indexOf("<?end>", at);
+      if (end === -1) return html;
+      for (let s = at; (s = html.indexOf("<?start ", s)) !== -1 && s < end; s += 8) depth++;
+      at = end;
+      if (!depth--) return html.slice(0, first - start.length) + value + html.slice(end + 6);
+    }
+  }
+  const close = `<!--pl-${key}-->`;
+  return html.slice(0, first) + value + html.slice(html.indexOf(close, at) + close.length);
 }
 
 function classListToObject(classList) {

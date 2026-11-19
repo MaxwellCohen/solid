@@ -727,9 +727,14 @@ function ssrLoadingBoundary(
 
   const fallbackOwner = createOwner({ id });
   // The placeholder wrapper around a streaming fallback (see `plainFallback`).
-  const tpl = collapseFallback
-    ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
-    : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
+  // With `templateFor` the scaffold is a declarative-patching range: a
+  // `<?start name>` ahead of the `pl-*` template and `<?end>` in place of
+  // the `<!--pl-X-->` comment, so a browser that supports `<template for>`
+  // swaps the content in natively with scripts off. The `pl-*` template stays
+  // because the client looks the placeholder up by id.
+  const open = `${ctx.templateFor ? `<?start name="${id}">` : ""}<template id="pl-${id}">`;
+  const close = ctx.templateFor ? "<?end>" : `<!--pl-${id}-->`;
+  const tpl = collapseFallback ? [open, "</template>" + close] : [open + "</template>", close];
   const fallbackResult = runWithOwner(fallbackOwner, () => {
     if (!ctx.async || finalAtDiscovery) return fallback();
     return ctx.ssr(tpl, ctx.escape(fallback()));
@@ -757,7 +762,13 @@ function ssrLoadingBoundary(
   }
 
   if (ctx.async) {
-    const regOpts = revealGroup ? { revealGroup: revealGroup.id } : undefined;
+    // A collapsed slot hands over its plain fallback: with `templateFor`
+    // the renderer patches it in natively when the frontier reaches the slot.
+    const regOpts = revealGroup
+      ? collapseFallback
+        ? { revealGroup: revealGroup.id, fallback: plainFallback }
+        : { revealGroup: revealGroup.id }
+      : undefined;
     const settle = ctx.registerFragment(id, regOpts);
     done = (value, error, escaped) => ((container.open = false), settle(value, error, escaped));
     container.open = true;

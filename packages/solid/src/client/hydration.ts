@@ -2465,6 +2465,7 @@ function initBoundaryResume(
     if (!isDisposed(o as Owner)) return;
     sharedConfig.cleanupFragment?.(id);
     if (release()) checkHydrationComplete();
+    settleSwap(id);
   });
   const set = createBoundaryTrigger();
   return [
@@ -2537,12 +2538,37 @@ function fragmentState(id: string) {
 // page without one never asks, and does not carry the predicate.
 let _ownedFragment: ((id: string) => boolean) | undefined;
 
+// One claimed swap in flight at a time. A claimed fragment swapped in
+// removes its boundary's fallback before the boundary resumes; until then the
+// client still counts those fallback nodes as rendered. A second claimed swap
+// landing in that window (a reveal group releasing several fragments in one
+// batch) would leave a sibling's resume to reconcile the parent against the
+// stale fallback, putting it back over the swapped-in content — and the
+// boundary, when it resumes, finds the fallback instead of its content and
+// renders fresh. So a claimed swap waits while another is in flight and runs,
+// in order, once that one's resume has flushed (`settleSwap`): the same
+// microtask burst, before the browser paints.
+let _swapping: string | 0 = 0;
+const _swapQueue: string[] = [];
+
 function fragmentPolicy(id: string) {
   const f = fragmentState(id);
-  if (!_hydrationDone || f.claimed || (_ownedFragment !== undefined && _ownedFragment(id)))
-    return (globalThis as any).$dfr(id);
+  // (A repeat $df of a queued id finds no template when it replays: a no-op.)
+  if (f.claimed && _swapping && _swapping !== id) return (_swapQueue.push(id), 0);
+  if (!_hydrationDone || f.claimed || (_ownedFragment !== undefined && _ownedFragment(id))) {
+    const swapped = (globalThis as any).$dfr(id);
+    if (swapped && f.claimed) _swapping = id;
+    return swapped;
+  }
   f.held = true;
   return 0;
+}
+
+// The claimant of the swap in flight resumed (its flush ran) or is gone: the
+// next queued claimed swap may land.
+function settleSwap(id: string) {
+  if (_swapping === id)
+    for (_swapping = 0; !_swapping && _swapQueue.length; ) fragmentPolicy(_swapQueue.shift()!);
 }
 
 // Ownership by rendering (see the ledger's policy above): the fragment's
@@ -3026,7 +3052,11 @@ function hydratedCreateLoadingBoundary<T, U>(
       }
 
       settledSerializationResumeQueued = true;
-      const [, resume] = initBoundaryResume(o, id);
+      const [, resumeBoundary] = initBoundaryResume(o, id);
+      const resume = (shouldHydrate?: boolean | 0) => {
+        resumeBoundary(shouldHydrate);
+        settleSwap(id);
+      };
       // Observe: the clock for a recovery record, read only when someone
       // will hear it (a listener on "recovery"). Prod: a dead constant.
       const registeredAt =
@@ -3107,7 +3137,25 @@ function hydratedCreateLoadingBoundary<T, U>(
         0,
         fragmentAbort(id)
       );
-      return revealed ? undefined : fallback();
+      if (revealed) return undefined;
+      // A collapsed slot: the server parked its fallback inside the
+      // placeholder template, and nothing has materialized it yet. There is
+      // nothing in the document to hydrate — the runtime inserts the
+      // fallback itself if the frontier reaches this slot first.
+      const pl = document.getElementById("pl-" + id) as any;
+      if (pl) {
+        if (!pl._$fl && pl.content?.firstChild) return undefined;
+        // The fallback sits inside the patching range, behind its start
+        // marker (or, without ranges, the placeholder template). Tag its
+        // first node with that start: a sibling's content reconciled in
+        // before this boundary has to land ahead of the range, or this
+        // fragment's swap removes it (see reconcileArrays).
+        const start = pl.previousSibling;
+        if (pl.nextSibling)
+          pl.nextSibling._$rs =
+            start && /^\??start/.test(start.target || start.nodeValue) ? start : pl;
+      }
+      return fallback();
     }
 
     if (assetPromise && !sharedConfig.has!(id)) {
