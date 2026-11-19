@@ -2576,31 +2576,104 @@ export function renderToStream(code, options = {}) {
           );
         }
       } else {
-        // Eager (ungrouped, link-free) fragments carry `for` with
-        // `templateFor`, so a browser with scripts disabled patches them in
-        // as it parses. Deferred ones stay plain templates, and so do
-        // rejected ones: their reveal record lists the inserted nodes, which
-        // only the scripted swap can see.
-        const native = context.templateFor && !deferActivation && !meta.error;
-        // With scripts on, `$df` owns the swap: the runtime has to load — and
-        // `$dpi` blank the start markers already parsed — before the first
-        // `for` template reaches the parser, or the browser patches that
-        // fragment ahead of the reveal policy. Its own script, so the tasks
-        // already queued still land with the template they belong to.
-        if (native && !scriptFlushed && !noScripts) {
-          scriptFlushed = true;
-          buffer.write(`<script${nonceAttr(nonce, "script")}>${REPLACE_SCRIPT}</script>`);
+        // Link-free fragments carry `for` with `templateFor`, so a browser
+        // with scripts disabled patches them in as it parses. Rejected ones
+        // stay plain templates: their reveal record lists the inserted
+        // nodes, which only the scripted swap can see. (A `for` template
+        // goes out through `writeNative`, which puts the runtime ahead of
+        // the first one when scripts are on.)
+        //
+        // Reveal-grouped fragments are patchable too, but only once their
+        // group releases them: a native patch cannot wait for a frontier, so
+        // the server holds the template (and the `<key>_fr` settle that
+        // announces it) until `reveal()`, and writes it there as a `for`
+        // template, in reveal order. A fragment nested inside content that
+        // has not gone out yet waits behind it the same way: its patch
+        // target only exists once the enclosing patch has landed.
+        const waiting = waitingOn.get(key);
+        if (waiting) waitingOn.delete(key);
+        if (context.templateFor && !meta.error && meta.settle) {
+          const entry = {
+            key,
+            tpl: tpl.replace(`<template id="${key}"`, `$& for="${key}"`),
+            plain: tpl,
+            settle: meta.settle,
+            task: !deferActivation,
+            revealed: !deferActivation,
+            deps: waiting ? waiting.deps : []
+          };
+          const ancestor = unwrittenAncestor(key);
+          if (deferActivation || ancestor) {
+            unwritten.set(key, entry);
+            if (ancestor && entry.revealed) ancestor.deps.push(entry);
+            return true;
+          }
+          writeNative(entry.tpl);
+          emitTask(`$df("${key}")`);
+          // Settled by the caller; what waited on this content follows it.
+          flushDeps(entry);
+          return;
         }
-        buffer.write(native ? tpl.replace(`<template id="${key}"`, `$& for="${key}"`) : tpl);
+        buffer.write(tpl);
         if (!deferActivation) {
           emitTask(`$df("${key}")`);
         }
       }
     },
     // Reveal a set of fragments (registration order). Document behavior:
-    // $dfj task, or $dflj to materialize fallback content instead.
+    // $dfj task, or $dflj to materialize fallback content instead. With
+    // `templateFor`, held fragments go out here as `for` templates, ahead of
+    // their activation, and a collapsed slot's fallback goes out as a patch
+    // that re-opens the range, so a later content patch still finds it.
     reveal(keys, meta) {
-      emitTask(`${meta.fallback ? "$dflj" : "$dfj"}(${JSON.stringify(keys)})`);
+      if (meta.fallback) {
+        emitTask(`$dflj(${JSON.stringify(keys)})`);
+        for (const key of keys) {
+          const fallback = collapsedFallbacks.get(key);
+          if (!fallback) continue;
+          collapsedFallbacks.delete(key);
+          const html = fallback();
+          if (html === undefined) continue;
+          const entry = {
+            tpl: `<template for="${key}"><?start name="${key}">${html}<?end></template>`,
+            slot: key,
+            deps: []
+          };
+          const ancestor = unwrittenAncestor(key, true);
+          ancestor ? ancestor.deps.push(entry) : commitNative(entry);
+        }
+        return;
+      }
+      const now = [];
+      const live = [];
+      for (const key of keys) {
+        const entry = unwritten.get(key);
+        if (!entry) {
+          live.push(key);
+          continue;
+        }
+        if (entry.revealed) continue;
+        entry.revealed = true;
+        const ancestor = unwrittenAncestor(key);
+        if (ancestor) {
+          // Its placeholder is not in the document yet: activate it on its
+          // own once the enclosing content lands.
+          entry.task = true;
+          ancestor.deps.push(entry);
+        } else {
+          now.push(entry);
+          live.push(key);
+        }
+      }
+      for (const entry of now) {
+        unwritten.delete(entry.key);
+        writeNative(entry.tpl);
+      }
+      if (live.length) emitTask(`$dfj(${JSON.stringify(live)})`);
+      for (const entry of now) {
+        entry.settle();
+        flushDeps(entry);
+      }
     },
     // A late-registered asset while streaming. Document behavior: style links
     // are handled per-fragment (see fragment()); modules preload immediately;
@@ -2719,6 +2792,7 @@ export function renderToStream(code, options = {}) {
   // no shell. Both consumers' flush loops call this again once they resolve.
   const flushEnd = () => {
     if (!registry.size && !holds && !rootHoles) {
+      releaseUnwritten();
       serializeRootAssets();
       queue(() =>
         queue(() => {
@@ -2942,6 +3016,81 @@ export function renderToStream(code, options = {}) {
   let scriptFlushed = false;
   let headStyles;
   const revealGroups = new Map();
+  // `templateFor` patches not yet written (see the sink's fragment()):
+  // reveal-grouped fragments awaiting their group, and anything nested in
+  // content still held. Insertion order is stream order.
+  const unwritten = new Map();
+  // A collapsed slot's plain fallback markup, for the patch that shows it.
+  const collapsedFallbacks = new Map();
+  // Patches waiting on a fragment that has not settled yet (a collapsed
+  // slot's fallback inside a pending boundary), keyed by that fragment.
+  const waitingOn = new Map();
+  // Before the shell is out nothing can be written after it: patches wait.
+  let beforeShell = null;
+  // What a patch for `key` has to go out after, if anything: the closest
+  // enclosing fragment whose content is not in the stream yet — held here,
+  // or still pending (its placeholder for `key` is not in the document).
+  const unwrittenAncestor = (key, pending) => {
+    let found;
+    let at = 0;
+    for (const [k, entry] of unwritten)
+      if (k.length < key.length && k.length > at && key.startsWith(k))
+        ((found = entry), (at = k.length));
+    if (pending)
+      for (const k of registry.keys())
+        if (k.length < key.length && k.length > at && key.startsWith(k)) {
+          let holder = waitingOn.get(k);
+          if (!holder) waitingOn.set(k, (holder = { deps: [] }));
+          ((found = holder), (at = k.length));
+        }
+    if (!found && !firstFlushed) found = beforeShell ||= { deps: [] };
+    return found;
+  };
+  // With scripts on, `$df` owns the swap: the runtime has to load — and
+  // `$dpi` blank the start markers already parsed — before the first `for`
+  // template reaches the parser, or the browser patches that fragment ahead
+  // of the reveal policy. Its own script, so the tasks already queued still
+  // land with the template they belong to.
+  const writeNative = tpl => {
+    if (!scriptFlushed && !noScripts) {
+      scriptFlushed = true;
+      buffer.write(`<script${nonceAttr(nonce, "script")}>${REPLACE_SCRIPT}</script>`);
+    }
+    buffer.write(tpl);
+  };
+  const commitNative = entry => {
+    // A fallback patch held for the shell whose slot settled in the
+    // meantime: its content was inlined, there is no fallback to show.
+    if (entry.slot && !firstFlushed && !registry.has(entry.slot)) return;
+    if (entry.key) unwritten.delete(entry.key);
+    writeNative(entry.tpl);
+    if (entry.task) emitTask(`$df("${entry.key}")`);
+    entry.settle && entry.settle();
+    flushDeps(entry);
+  };
+  const flushDeps = entry => {
+    const deps = entry.deps;
+    entry.deps = [];
+    for (const dep of deps) commitNative(dep);
+  };
+  // The render is complete with patches still held: their group can no
+  // longer release them (its slots all settled), so they go out as plain
+  // templates — what the client would have had all along — and settle.
+  const releaseUnwritten = () => {
+    if (!unwritten.size) return;
+    const entries = [...unwritten.values()];
+    unwritten.clear();
+    const released = new Set();
+    const release = entry => {
+      if (released.has(entry)) return;
+      released.add(entry);
+      if (entry.plain) buffer.write(entry.plain);
+      entry.settle && entry.settle();
+      for (const dep of entry.deps) release(dep);
+      entry.deps = [];
+    };
+    for (const entry of entries) release(entry);
+  };
   let timer = null;
   const emitTask = task => {
     pushTask(`${task}${!scriptFlushed ? ";" + REPLACE_SCRIPT : ""}`);
@@ -3141,6 +3290,8 @@ export function renderToStream(code, options = {}) {
     ssr: ssr,
     registerFragment(key, options) {
       const revealGroup = options && options.revealGroup;
+      if (context.templateFor && options && options.fallback)
+        collapsedFallbacks.set(key, options.fallback);
       if (revealGroup) {
         let group = revealGroups.get(revealGroup);
         if (!group) {
@@ -3278,10 +3429,19 @@ export function renderToStream(code, options = {}) {
                   revealGroup,
                   error: error
                     ? ssrSanitizeError(error, null, undefined, undefined, errorScope)
-                    : error
+                    : error,
+                  // A sink that holds the fragment back (a `templateFor`
+                  // patch waiting on its reveal group, or on the content it
+                  // is nested in) settles it when the template goes out, so
+                  // the client never reads a settled fragment whose template
+                  // is not in the document.
+                  settle: () => item.resolve(error)
                 }
-              );
-              item.resolve(error);
+              ) !== true
+                ? item.resolve(error)
+                : // The completion check still runs: a fragment whose group
+                  // never releases it goes out at the end (releaseUnwritten).
+                  queue(() => queue(() => queue(flushEnd)));
             }
           }
         }
@@ -3511,6 +3671,11 @@ export function renderToStream(code, options = {}) {
       head
     });
     tasks = "";
+    if (beforeShell) {
+      const held = beforeShell;
+      beforeShell = null;
+      flushDeps(held);
+    }
     onCompleteShell &&
       onCompleteShell({
         write(v) {

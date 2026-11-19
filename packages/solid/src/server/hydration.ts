@@ -762,7 +762,13 @@ function ssrLoadingBoundary(
   }
 
   if (ctx.async) {
-    const regOpts = revealGroup ? { revealGroup: revealGroup.id } : undefined;
+    // A collapsed slot hands over its plain fallback: with `templateFor`
+    // the renderer patches it in natively when the frontier reaches the slot.
+    const regOpts = revealGroup
+      ? collapseFallback
+        ? { revealGroup: revealGroup.id, fallback: plainFallback }
+        : { revealGroup: revealGroup.id }
+      : undefined;
     const settle = ctx.registerFragment(id, regOpts);
     done = (value, error, escaped) => ((container.open = false), settle(value, error, escaped));
     container.open = true;

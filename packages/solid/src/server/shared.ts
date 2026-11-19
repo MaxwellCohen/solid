@@ -48,7 +48,7 @@ export type HydrationContext = {
    */
   registerFragment: (
     v: string,
-    options?: { revealGroup?: string }
+    options?: { revealGroup?: string; fallback?: () => string | undefined }
   ) => (v?: string, err?: any, escaped?: { frame?: string }) => boolean;
   /**
    * @internal The frame id of the server component this context renders
