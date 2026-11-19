@@ -2577,9 +2577,12 @@ export function renderToStream(code, options = {}) {
         }
       } else {
         // Link-free fragments carry `for` with `templateFor`, so a browser
-        // with scripts disabled patches them in as it parses. Rejected ones
-        // stay plain templates: their reveal record lists the inserted
-        // nodes, which only the scripted swap can see. (A `for` template
+        // with scripts disabled patches them in as it parses. A rejected
+        // one patches in the outcome it rendered (a server <Errored>'s
+        // fallback); with scripts on the markers are disarmed, so its swap
+        // still runs scripted and lists the inserted nodes. One with no
+        // outcome (empty: the client renders the failure) stays plain, and
+        // without scripts its fallback stays up. (A `for` template
         // goes out through `writeNative`, which puts the runtime ahead of
         // the first one when scripts are on.)
         //
@@ -2592,7 +2595,7 @@ export function renderToStream(code, options = {}) {
         // target only exists once the enclosing patch has landed.
         const waiting = waitingOn.get(key);
         if (waiting) waitingOn.delete(key);
-        if (context.templateFor && !meta.error && meta.settle) {
+        if (context.templateFor && meta.settle && (!meta.error || value)) {
           const entry = {
             key,
             tpl: tpl.replace(`<template id="${key}"`, `$& for="${key}"`),
