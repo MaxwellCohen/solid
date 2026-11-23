@@ -18,11 +18,15 @@ import {
   enforceLoadingBoundary,
   resetErrorHalt,
   ROOT_ERROR_HOOK,
-  OBSERVE
+  OBSERVE,
+  strictReadTracked,
+  setSwapHook,
+  isHidden
 } from "solid-js";
 import type { ClientErrorHook, Owner } from "solid-js";
 import {
   sharedConfig,
+  heldRead,
   enableServerComponentHydration,
   viewOf,
   OmitView,
@@ -265,6 +269,15 @@ export function HydrationScript(_props?: { nonce?: CSPNonce; eventNames?: string
 
 export { effect, memo, untrack, getOwner, createComponent };
 /**
+ * Compiled grouped effects read it after their values: a stateful DOM prop
+ * (`value`, `checked`, …) whose value did not change is not written again
+ * while the effect is a stale reader of an open hold (#4872). The hold's
+ * landing re-runs the effect and writes the bound value.
+ *
+ * @internal Compiler output only.
+ */
+export { heldRead };
+/**
  * Compiler-emitted prop-spread helper. The JSX transform emits
  * `mergeProps(...)` when compiling prop spreads on components — not a
  * user-facing API. Application code should import `merge` from `solid-js`.
@@ -443,6 +456,45 @@ export function render(code, element, init, options = {}) {
   };
 }
 
+let policy;
+
+/**
+ * Sets the Trusted Types policy that HTML is parsed through.
+ *
+ * A page that enforces `require-trusted-types-for 'script'` rejects a plain
+ * string assigned to `innerHTML`. With a policy set, the runtime assigns the
+ * `TrustedHTML` that `policy.createHTML(html)` returns. It is asked for two
+ * kinds of HTML: the static markup the compiler emitted for a template, and
+ * the HTML a server component sends, which the frames client parses. The app
+ * creates the policy, so its name and its checks stay under the app's
+ * Content Security Policy:
+ *
+ * ```ts
+ * setTrustedTypesPolicy(trustedTypes.createPolicy("my-app", { createHTML: html => html }));
+ * ```
+ *
+ * Call it before the first render. `undefined` goes back to plain strings.
+ */
+export function setTrustedTypesPolicy(
+  policy: { createHTML(html: string): unknown } | undefined
+): void;
+
+export function setTrustedTypesPolicy(value) {
+  policy = value;
+}
+
+/**
+ * What a parse assigns to `innerHTML` for `html`: the policy's `TrustedHTML`
+ * when `setTrustedTypesPolicy` set one, otherwise the string. Integration
+ * plumbing for the frames client, which parses outside this module.
+ * @internal
+ */
+export function trustedHTML(html: string): string;
+
+export function trustedHTML(html) {
+  return policy ? policy.createHTML(html) : html;
+}
+
 function create(html, bypassGuard, flag) {
   if ("_SOLID_DEV_" && isHydrating() && !bypassGuard)
     throw new Error(
@@ -461,7 +513,9 @@ function create(html, bypassGuard, flag) {
         "where the document shell already exists."
     );
   const t = document.createElement("template");
-  t.innerHTML = html;
+  // Not `trustedHTML(html)`: inline, a bundle that sets no policy folds this
+  // to the plain assignment.
+  t.innerHTML = policy ? policy.createHTML(html) : html;
   const node = t.content.firstChild;
   return flag === 2 ? node.firstChild : node;
 } /**
@@ -476,10 +530,10 @@ export function template(html: string, flag?: 1 | 2): () => Element;
 
 export function template(html, flag) {
   let node;
-  const fn =
-    flag === 1
-      ? bypassGuard => document.importNode(node || (node = create(html, bypassGuard, flag)), true)
-      : bypassGuard => (node || (node = create(html, bypassGuard, flag))).cloneNode(true);
+  const fn = bypassGuard => (
+    node || (node = create(html, bypassGuard, flag)),
+    flag === 1 ? document.importNode(node, true) : node.cloneNode(true)
+  );
 
   if ("_SOLID_DEV_") fn._html = flag === 2 ? html.replace(/^<[^>]+>/, "") : html;
   return fn;
@@ -499,14 +553,14 @@ export function delegateEvents(eventNames) {
 export function registerDelegatedRoot(root: MountableElement): void;
 
 export function registerDelegatedRoot(root) {
-  const state = registerDelegatedContainer(root, root);
-  if (state) state.roots = (state.roots || 0) + 1;
+  // A root is a container that owns itself: `getDelegatedRoot` reads that
+  // off `owners` (which already counts the registrations), so a mount pays
+  // for no second counter.
+  registerDelegatedContainer(root, root);
 } /** Event-delegation plumbing (Portal/custom-root wiring). Integration plumbing. @internal */
 export function unregisterDelegatedRoot(root: MountableElement): void;
 
 export function unregisterDelegatedRoot(root) {
-  const state = delegatedContainers.get(root);
-  if (state) state.roots > 1 ? state.roots-- : delete state.roots;
   unregisterDelegatedContainer(root, root);
 } /** Event-delegation plumbing (Portal/custom-root wiring). Integration plumbing. @internal */
 export function registerDelegatedContainer(
@@ -527,7 +581,6 @@ export function registerDelegatedContainer(container, owner = container) {
     );
   state.owners.set(owner, (state.owners.get(owner) || 0) + 1);
   delegatedEvents.forEach(name => attachDelegatedEvent(name, container, state));
-  return state;
 } /** Event-delegation plumbing (Portal/custom-root wiring). Integration plumbing. @internal */
 export function unregisterDelegatedContainer(
   container: MountableElement,
@@ -541,8 +594,17 @@ export function unregisterDelegatedContainer(container, owner = container) {
   if (count > 1) state.owners.set(owner, count - 1);
   else state.owners.delete(owner);
   if (state.owners.size) return;
-  state.handlers.forEach((handler, name) => container.removeEventListener(name, handler));
+  state.handlers.forEach((handler, name) => {
+    container.removeEventListener(name, resetDelegatedEvent, true);
+    container.removeEventListener(name, handler);
+  });
   delegatedContainers.delete(container);
+}
+
+function resetDelegatedEvent(e) {
+  // The owner mark belongs to one native dispatch, not the Event object.
+  // All root capture listeners run before any delegated bubble listener.
+  delete e[$$EVENT_OWNER];
 }
 
 function attachDelegatedEvent(name, container, state) {
@@ -551,6 +613,7 @@ function attachDelegatedEvent(name, container, state) {
     ? e => dispatchAsInteraction(e, () => eventHandler(e, container, state))
     : e => eventHandler(e, container, state);
   state.handlers.set(name, handler);
+  container.addEventListener(name, resetDelegatedEvent, true);
   container.addEventListener(name, handler);
 }
 
@@ -633,7 +696,7 @@ export function getDelegatedRoot(node: MountableElement): MountableElement | und
 
 export function getDelegatedRoot(node) {
   while (node) {
-    if (delegatedContainers.get(node)?.roots) return node;
+    if (delegatedContainers.get(node)?.owners.has(node)) return node;
     node = parentOf(node);
   }
 }
@@ -642,8 +705,7 @@ export function getDelegatedRoot(node) {
 // shadow root's host.
 const parentOf = node => node._$host || node.parentNode || node.host;
 
-function findOwner(target, state) {
-  let node = target;
+function findOwner(node, state) {
   let distance = 0;
   while (node) {
     if (state.owners.has(node)) return { owner: node, distance };
@@ -694,6 +756,23 @@ export function setStatefulProperty(node, name, value) {
   if ("_SOLID_DEV_") checkStatefulWrite(node, name, value);
   node[name] = value;
   if ("_SOLID_DEV_") recordStatefulWrite(node, name, value);
+}
+
+/**
+ * An event handler expression from dev-compiled DOM output (#1742):
+ * `onClick={props.onClick}` compiles to `strictHandler(() => props.onClick)`
+ * where production output inlines `props.onClick`. A handler is bound once,
+ * where its element is created, so a reactive read in the expression is a
+ * mistake: dev warns `STRICT_READ_UNTRACKED` (a pending async read throws
+ * `PENDING_ASYNC_UNTRACKED_READ`). The read still tracks, so dev re-mounts
+ * on a change exactly as production does. Production compile output never
+ * imports it, so it tree-shakes away.
+ *
+ * @internal Compiler output only.
+ */
+export function strictHandler<T>(fn: () => T): T;
+export function strictHandler(fn) {
+  return "_SOLID_DEV_" ? strictReadTracked(fn) : fn();
 }
 
 // === Element claims ===
@@ -948,7 +1027,7 @@ export function className(node, value, prev) {
     return;
   }
   if (typeof value === "string") {
-    node._$classes = undefined;
+    if (node._$classes) node._$classes = undefined;
     value !== prev && node.setAttribute("class", value);
     return;
   }
@@ -1091,8 +1170,8 @@ export function style(node, value, prev) {
  * read per key; a clsx-style class array is re-mapped element-wise (className
  * allocates for an array anyway; measured at parity).
  *
- * The proxy's keys are read with `Reflect.ownKeys` directly — what
- * `sourceKeys(value, SOURCE_PROXY)` resolves to by definition (`leafOf` is
+ * The proxy's keys are read with `Reflect.ownKeys` directly — the keys
+ * `sourceKeys(value, SOURCE_PROXY)` returns by definition (`leafOf` is
  * the identity for a proxy kind; `leafKeys` answers a proxy with one
  * `ownKeys` trap) — rather than through `sourceKeys`, whose kind argument is
  * a runtime value: calling it here retained the merge/omit view walkers
@@ -1157,10 +1236,12 @@ export function spread<T>(
 //   props in the compute half and applied in the commit half only when its
 //   identity differs from the last applied one (`prevProps.ref`, recorded by
 //   assign()). `ref()` runs the callback as a render effect's callback runs
-//   (`runRefCallback`, #4761): untracked, owning nothing — creating a
+//   (`runRefCallback`, #4761 / #4767): untracked, owning nothing — creating a
 //   primitive in it is an error in dev, and the commit half runs with no
 //   owner — so the effect rerunning has nothing of the ref's to dispose;
-//   that is what makes the fold safe.
+//   that is what makes the fold safe. A born-held staged memo read there by a
+//   ref born into that hold serves the staged value (#4767; A19 would throw
+//   NotReadyError and park the hold). A ref outside the hold must not (F-7).
 //
 // Sources. A single source is an object, a merge() result or a bare
 // accessor. A lone reactive spread compiles to its accessor directly: merging
@@ -1208,26 +1289,40 @@ export function spread(node, props, skipChildren, skip, name, loc) {
     claimHandlers !== null && (node.localName === "a" || node.localName === "form")
       ? getOwner()
       : undefined;
+  // #4872: whether the run read past a held write (`heldRead`, after the
+  // reads). A stateful prop skips an unchanged write then, as in a compiled
+  // grouped effect; the hold's landing re-runs the spread.
+  let held = 0;
   const apply = newProps => {
     const r = newProps.ref;
     if (r !== prevProps.ref && (typeof r === "function" || Array.isArray(r))) ref(() => r, node);
+    spreadHeld = held;
     assign(node, newProps, true, prevProps, true);
+    spreadHeld = 0;
     if (owner !== undefined) claimElement(node, owner);
   };
+  const read = fn => () => {
+    const p = fn();
+    held = heldRead();
+    return p;
+  };
   if (Array.isArray(props)) {
-    effect(() => collectSources({}, props, undefined, skip), apply);
+    effect(
+      read(() => collectSources({}, props, undefined, skip)),
+      apply
+    );
     if ("_SOLID_DEV_") unscopedByDesign = node;
     if (!skipChildren && !(skip !== undefined && skip("children")))
       insert(node, () => {
         for (let i = props.length - 1; i >= 0; i--) {
           const s = resolveSource(props[i]);
-          if (s != null && entryHas(s, "children")) return entryGet(s, "children");
+          if (s && entryHas(s, "children")) return entryGet(s, "children");
         }
       });
     if ("_SOLID_DEV_") unscopedByDesign = null;
     return prevProps;
   }
-  effect(() => {
+  const collect = () => {
     const source = resolveSource(props);
     const newProps = {};
     // A merge() proxy is read through its SOURCES, not through the proxy: a
@@ -1247,14 +1342,15 @@ export function spread(node, props, skipChildren, skip, name, loc) {
     // key, no re-enumeration and no per-key walk of the later sources.
     const table = resolvedTable(source);
     if (table !== undefined) return collectTable(newProps, table, skip);
-    if (source != null) {
+    if (source) {
       const view = viewOf(source);
       if (view instanceof OmitView) collectProps(newProps, view, SOURCE_OMIT, skip);
       else if (view !== undefined) collectSources(newProps, view.sources, view.kinds, skip);
       else collectProps(newProps, source, $PROXY in source ? SOURCE_PROXY : SOURCE_PLAIN, skip);
     }
     return newProps;
-  }, apply);
+  };
+  effect(read(collect), apply);
   if ("_SOLID_DEV_") unscopedByDesign = node;
   if (!skipChildren && !(skip !== undefined && skip("children"))) {
     if (typeof props !== "function" && props != null && hasStaticKeys(props)) {
@@ -1272,9 +1368,7 @@ export function spread(node, props, skipChildren, skip, name, loc) {
     } else
       insert(node, () => {
         const source = resolveSource(props);
-        return source != null && entryHas(source, "children")
-          ? entryGet(source, "children")
-          : undefined;
+        return source && entryHas(source, "children") ? entryGet(source, "children") : undefined;
       });
   }
   if ("_SOLID_DEV_") unscopedByDesign = null;
@@ -1341,7 +1435,7 @@ function pushEntry(resolved, kinds, s, kind) {
     return;
   }
   s = resolveSource(s);
-  if (s == null) return;
+  if (!s) return;
   const view = viewOf(s);
   if (view instanceof OmitView) {
     resolved.push(view);
@@ -1402,10 +1496,11 @@ export function ref(
 export function ref(fn, element) {
   const resolved = untrack(fn);
   // A render effect's callback at creation (#4761): untracked, in the
-  // creating pass. Dev adds the effect-callback scope (`runRefCallback`).
-  "_SOLID_DEV_"
-    ? runRefCallback(() => applyRef(resolved, element))
-    : untrack(() => applyRef(resolved, element));
+  // creating pass. Always through `runRefCallback` so a read of a born-held
+  // staged memo by a ref born into that hold serves its staged value (#4767)
+  // instead of throwing NotReadyError from the ownerless commit half. Dev
+  // also stamps the effect-callback scope (primitive creation throws).
+  runRefCallback(() => applyRef(resolved, element));
 }
 
 /** Compiler-emitted primitive; not for hand-written code. @internal */
@@ -1478,6 +1573,50 @@ let hostRt = null;
 export function installHostTagging() {
   hostRt = tagHost;
 }
+/**
+ * Dev CHECK, hydration: an insert claims a server-rendered element that is
+ * not its parent's child. The server wrote the element inside `parent`, as
+ * the JSX nests it, but the nesting is invalid HTML and the browser's parser
+ * rebuilt the tree: a `<div>` closes an open `<p>`, an `<a>` closes an open
+ * `<a>`, a `<tr>` directly in a `<table>` gets an implied `<tbody>`. The
+ * compiler rejects these inside one template; across a component boundary
+ * only hydration sees them. The claimed node stays where the parser put it,
+ * so the page differs from a client render, and an insert that owns
+ * `parent`'s children cannot update a node that sits elsewhere (#4875).
+ * Warns once per parent. Lives in the client entry: the server never
+ * hydrates.
+ */
+function checkParserMoved(parent: Element, node: Element): void {
+  const at = node.parentNode as Element | null;
+  if (!at || at === parent || (parent as any).$$nest) return;
+  (parent as any).$$nest = 1;
+  // A wrapper the parser added carries no hydration key (the server never
+  // wrote it): the implied <tbody>.
+  const wrapped = at.parentNode === parent && !at.hasAttribute("_hk");
+  const p = `<${parent.localName}>`,
+    n = `<${node.localName}>`;
+  devCheck({
+    code: "INVALID_HTML_NESTING",
+    kind: "render",
+    severity: "warn",
+    message:
+      `[INVALID_HTML_NESTING] The server rendered ${n} inside ${p}, which HTML does not ` +
+      `allow there, and the browser's parser ` +
+      (wrapped
+        ? `wrapped it in a <${at.localName}> it added`
+        : `moved it: it now sits in <${at.localName}>`) +
+      `. Hydration keeps the parser's tree, so the page differs from a client render and ` +
+      `Solid cannot update ${n} through ${p} (a removed node stays, a new one lands ` +
+      `elsewhere). The nesting usually spans a component boundary, which the compiler ` +
+      `cannot check. ` +
+      (wrapped
+        ? `Write the <${at.localName}> yourself: \`${p}<${at.localName}>…</${at.localName}></${parent.localName}>\`.`
+        : `Change the outer element (a <div> for a <p> that holds blocks), or move ${n} out ` +
+          `of ${p}.`),
+    data: { parent: parent.localName, child: node.localName, found: at.localName }
+  });
+}
+
 export function installHydrationRuntime() {
   hydrationRt = {
     // insert(): claim the parent's childNodes as the initial current on
@@ -1502,8 +1641,9 @@ export function installHydrationRuntime() {
     // re-claimed (#4374).
     reclaimRegion(current, parent, marker) {
       if (!sharedConfig.hydrating || current == null || !parent.isConnected) return current;
-      const first = Array.isArray(current) ? current[0] : current;
-      if (first == null || first.isConnected) return current;
+      // A swap can take a middle node of the region, past a live head (#4807).
+      if (Array.isArray(current) ? current.every(n => !n || n.isConnected) : current.isConnected)
+        return current;
       let nodes;
       if (marker) {
         nodes = [];
@@ -1641,7 +1781,7 @@ export function insert<T>(
   }
 ): JSX.Element;
 
-export function insert(parent, accessor, marker, initial, options) {
+export function insert(parent, accessor, marker, current, options) {
   // Inside a labelled `spread` (see there): the children insert is
   // `<tag>.children`, taken before `effect` would label it `<tag>.spread`.
   if (
@@ -1651,23 +1791,21 @@ export function insert(parent, accessor, marker, initial, options) {
   )
     options = { ...options, name: spreadName + ".children", loc: spreadLoc };
   const multi = marker !== undefined;
-  const host = options && options.host;
-  if (multi && !initial) initial = [];
-  if (hydrationRt !== null) initial = hydrationRt.claimInitial(parent, multi, initial);
+  if (multi && !current) current = [];
+  if (hydrationRt !== null) current = hydrationRt.claimInitial(parent, multi, current);
   if (typeof accessor !== "function") {
-    accessor = normalize(accessor, initial, multi, true);
+    accessor = normalize(accessor, current, multi, true);
     if (typeof accessor !== "function") {
-      insertExpression(parent, accessor, initial, marker);
-      hostRt !== null && host && hostRt(accessor, host);
+      insertExpression(parent, accessor, current, marker);
+      hostRt !== null && options && options.host && hostRt(accessor, options.host);
       return;
     }
   }
-  if (multi && initial.length === 0) {
+  if (multi && current.length === 0) {
     const placeholder = document.createTextNode("");
     parent.insertBefore(placeholder, marker);
-    initial = [placeholder];
+    current = [placeholder];
   }
-  let current = initial;
   // Whether a compute of this insert has produced a value before. Not read
   // off `prev`: a single-child hole's normalized value is `undefined` when it
   // rendered nothing, which looked like a first run, so content arriving
@@ -1703,7 +1841,7 @@ export function insert(parent, accessor, marker, initial, options) {
         ),
         inner => {
           current = insertExpression(parent, inner, current, marker);
-          hostRt !== null && host && hostRt(current, host);
+          hostRt !== null && options && options.host && hostRt(current, options.host);
         },
         "_SOLID_DEV_" ? { ...innerOptions, _wide: true } : innerOptions
       );
@@ -1713,7 +1851,7 @@ export function insert(parent, accessor, marker, initial, options) {
     value => {
       if (value === INNER_OWNED) return;
       current = insertExpression(parent, value, current, marker);
-      hostRt !== null && host && hostRt(current, host);
+      hostRt !== null && options && options.host && hostRt(current, options.host);
     },
     // Only the OUTER effect takes the scope — the inner unwrapping effect
     // stays transparent so content ids keep a fixed depth per hole.
@@ -2034,6 +2172,10 @@ function initHeadRegistry() {
   headRegistrations = [];
   headOwned = new Map();
   headApplied = new Map();
+  // A boundary swapping between its fallback and its content changes which
+  // registrations are on screen: content behind a fallback is not (F-3),
+  // nor are its tags (#4873).
+  setSwapHook(scheduleHeadApply);
   // A <title> without an ownership marker is user-authored shell markup: the
   // fallback restored when every title registration has disposed. A marked
   // one is server-registry output — but if the server's retitle overwrote a
@@ -2108,7 +2250,7 @@ function flushHeadRegistry() {
     return;
   }
   headScheduled = false;
-  const winners = resolveHead(headRegistrations);
+  const winners = resolveHead(headRegistrations.filter(r => !isHidden(r.node)));
   // Retractions: identities the registry owns that no longer resolve.
   for (const [identity, els] of headOwned) {
     if (winners.has(identity)) continue;
@@ -2312,10 +2454,12 @@ export function useHead(tag: HeadTag | HeadTag[] | (() => HeadTag | HeadTag[])):
  */
 export function useHead(tags) {
   initHeadRegistry();
-  const reg = { seq: -1, tags: null };
+  const reg = { seq: -1, tags: null, node: null };
   const uid = ++headUid;
   effect(
     () => {
+      // The registration's node: behind a fallback, its tags are withdrawn.
+      reg.node = getOwner();
       let list = typeof tags === "function" ? tags() : tags;
       if (!Array.isArray(list)) list = [list];
       const replaceable = [];
@@ -2477,14 +2621,15 @@ export function hydrate(code, element, options = {}) {
   // in-place-rewrite stash) sitting ahead of the shell's authored children
   // shift every read by one. Move that leading run — inert metas in an
   // unrendered element — to the end of head before any claiming. For apps
-  // without a prelude the loop exits on its first check.
+  // without a prelude the loop exits on its first check. It walks a snapshot
+  // of head's children: when the run is the whole head (no authored
+  // children), a live walk would reach the moved tags again and rotate the
+  // head forever.
   const head = (element.nodeType === 9 ? element : element.ownerDocument).head;
   if (head && element.contains(head)) {
-    let n = head.firstChild;
-    while (n && n.nodeType === 1 && n.hasAttribute("data-dh") && !n.hasAttribute("data-dhf")) {
-      const next = n.nextSibling;
+    for (const n of [...head.childNodes] as Element[]) {
+      if (n.nodeType !== 1 || !n.hasAttribute("data-dh") || n.hasAttribute("data-dhf")) break;
       head.appendChild(n);
-      n = next;
     }
   }
   options.renderId ||= "";
@@ -2649,7 +2794,13 @@ export function getNextElement(template) {
           `hydration id namespaces are misaligned — when hydrating a subtree of a larger ` +
           `server render, wrap the document shell in <NoHydration> and re-enter with ` +
           `<Hydration> around the hydrated subtree (or pass hydrate() a renderId matching ` +
-          `the server's <Hydration id>).`
+          `the server's <Hydration id>).` +
+          // The parser drops a <form> start tag inside an open <form>: the
+          // element never exists, so its key finds nothing (#4875).
+          (template._html && template._html.startsWith("<form")
+            ? ` If this <form> renders inside another <form> (through a component), the ` +
+              `browser's HTML parser dropped it: forms cannot nest. Move it out of the outer form.`
+            : "")
       );
     }
     return template(true);
@@ -2766,13 +2917,23 @@ export function runHydrationEvents() {
       if (!events) return;
       events.queued = false;
       while (events.length) {
-        const [el, e] = events[0];
+        const [el, e, origin] = events[0];
         if (!completed.has(el)) return;
         events.shift();
+        // Once native dispatch ends, a shadow event's target is retargeted to
+        // its host and composedPath() is empty. The bootstrap captured the
+        // original target while the event was still in flight.
+        // eventHandler deletes `target` when it finishes, so each replay
+        // defines it again.
+        const target = origin || e.target;
+        const replay = (container, state) => (
+          Object.defineProperty(e, "target", { configurable: true, value: target }),
+          eventHandler(e, container, state)
+        );
         let matchContainer, matchState, matchDistance, matches;
         for (const [container, state] of delegatedContainers) {
           if (!state.handlers.has(e.type)) continue;
-          const entry = findOwner(e.target, state);
+          const entry = findOwner(target, state);
           if (!entry) continue;
           if (matchContainer) {
             if (!matches)
@@ -2794,9 +2955,10 @@ export function runHydrationEvents() {
           // Replay innermost-first so queued hydration events follow the same
           // root-boundary handoff as live native bubbling.
           matches.sort((a, b) => a.distance - b.distance);
-          for (let i = 0; i < matches.length; i++)
-            eventHandler(e, matches[i].container, matches[i].state);
-        } else if (matchContainer) eventHandler(e, matchContainer, matchState);
+          for (let i = 0; i < matches.length; i++) replay(matches[i].container, matches[i].state);
+        } else if (matchContainer) replay(matchContainer, matchState);
+        // A replay that stopped early leaves the defined target behind.
+        delete e.target;
         // Each replayed event is its own instant, as live (#4285).
         flush();
       }
@@ -2928,12 +3090,14 @@ function flattenClassList(list, result) {
   }
 }
 
+/** The running spread read past a held write (#4872, `spread`). */
+let spreadHeld = 0;
 function assignProp(node, prop, value, prev, skipRef, nodeName) {
   if (prop === "style") return (style(node, value, prev), value);
   if (prop === "class") return (className(node, value, prev), value);
   // dom with state may differs from reactive state
   // dom value derives from reactive state
-  if (value === prev && DOMWithState[nodeName]?.[prop] !== 1) return prev;
+  if (value === prev && (spreadHeld || DOMWithState[nodeName]?.[prop] !== 1)) return prev;
   if (prop === "ref") {
     if (!skipRef && value) ref(() => value, node);
     return value;
@@ -3017,14 +3181,16 @@ function eventHandler(e, container, state) {
 
   let node = resumeNode || e.target;
   const key = EVENT_KEY + e.type;
-  const retarget = value =>
-    Object.defineProperty(e, "target", {
+  const define = (name, value) =>
+    Object.defineProperty(e, name, {
       configurable: true,
       value
     });
   const handleNode = () => {
     const handler = node[key];
     if (handler && !node.disabled) {
+      // currentTarget as data: V8 can retain a per-event getter in the event type's shape
+      define("currentTarget", node);
       const data = node[`${key}Data`];
       data !== undefined
         ? handler.call(node, data, e)
@@ -3037,7 +3203,7 @@ function eventHandler(e, container, state) {
       typeof node.host !== "string" &&
       !node.host._$host &&
       node.contains(e.target) &&
-      retarget(node.host);
+      define("target", node.host);
     return true;
   };
   // The walk ends at the owner, the boundary of event delegation.
@@ -3046,13 +3212,6 @@ function eventHandler(e, container, state) {
     while (node && handleNode() && !atOwner()) node = parentOf(node);
   };
 
-  // simulate currentTarget; the owner is the boundary of the walk
-  Object.defineProperty(e, "currentTarget", {
-    configurable: true,
-    get() {
-      return node || owner;
-    }
-  });
   if (resumeNode) {
     // If the boundary was the target, the inner walk already fired it.
     // Resume above it so boundary handlers do not run twice.
@@ -3061,7 +3220,7 @@ function eventHandler(e, container, state) {
   } else if (e.composedPath) {
     const path = e.composedPath();
     if (path.length) {
-      retarget(path[0]);
+      define("target", path[0]);
       for (let i = 0; i < path.length; i++) {
         node = path[i];
         if (!handleNode()) break;
@@ -3100,6 +3259,9 @@ function insertExpression(parent, value, current, marker) {
       for (const n of arr ? value : [value]) {
         if (n && n.nodeType) {
           if (!isHydrating(n)) return current;
+          // Dev: a claimed element the parser moved out of `parent`.
+          if ("_SOLID_DEV_" && n.nodeType === 1 && parent.nodeType === 1)
+            checkParserMoved(parent, n);
         } else if (arr && (typeof n === "string" || typeof n === "number")) {
           // A raw primitive in an ARRAY during a claim pass is a text hole
           // whose claim failed (normalize adopts live text nodes while
@@ -3137,8 +3299,7 @@ function insertExpression(parent, value, current, marker) {
     )
       return value;
   }
-  const t = typeof value,
-    multi = marker !== undefined;
+  const t = typeof value;
 
   if (t === "string" || t === "number") {
     const tc = typeof current;
@@ -3157,7 +3318,7 @@ function insertExpression(parent, value, current, marker) {
     cleanChildren(parent, current, marker);
   } else if (value.nodeType) {
     if (Array.isArray(current)) {
-      cleanChildren(parent, current, multi ? marker : null, value);
+      cleanChildren(parent, current, marker ?? null, value);
     } else if (current != null && current.nodeType) {
       // `current` is a node we previously inserted but it may have been
       // moved out by user code (e.g. ref-driven migration, JSX wrapping)
@@ -3241,9 +3402,10 @@ function writeSelectValue(node, value) {
     has = value != null && value.map;
   if (has) had || node.addEventListener("change", selectChange, true);
   else had && node.removeEventListener("change", selectChange, true);
+  const write = (node._$n = (node._$n || 0) + 1);
   if (value == null) {
     node._$v = null;
-    return queueMicrotask(() => (node.value = value)) || (node.value = value);
+    return queueMicrotask(() => node._$n === write && (node.value = value)) || (node.value = value);
   }
   node._$v = value;
   (selectInsert ||= applySelectValue)(node);
@@ -3298,14 +3460,22 @@ function normalize(value, current, multi, doNotUnwrap) {
 // retargeting can route back to the slot's logical position in the source
 // tree. Tagging here — rather than intercepting individual DOM calls — covers
 // every insertion path (append, replaceChild, reconcile, hydration claim)
-// without touching the hot reconcile loops. `$$HOST` short-circuits nodes
-// already tagged for this host on subsequent updates.
+// without touching the hot reconcile loops. `$$HOST` holds the slot's
+// accessor and short-circuits nodes already tagged for this host on
+// subsequent updates. Every node shares one getter that reads it: V8 keeps an
+// accessor in a descriptor array that other nodes of the same shape share,
+// so a per-portal getter (the slot's closure, with its content) stayed
+// reachable from any live node of that shape after the portal was disposed
+// (#4852).
+function hostGetter(this: any) {
+  return this[$$HOST]();
+}
 function tagHost(value, host) {
   if (Array.isArray(value)) {
     for (let i = 0, len = value.length; i < len; i++) tagHost(value[i], host);
   } else if (value && value.nodeType && value[$$HOST] !== host) {
     value[$$HOST] = host;
-    Object.defineProperty(value, "_$host", { get: host, configurable: true });
+    Object.defineProperty(value, "_$host", { get: hostGetter, configurable: true });
   }
 }
 

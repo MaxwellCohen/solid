@@ -13,6 +13,7 @@ import type {
   FallbackEvent,
   FlightEvent,
   FlushEvent,
+  FlushLive,
   GraphEvent,
   HoldEvent,
   InteractionEvent,
@@ -31,7 +32,14 @@ import {
   setSignal as writeSignal,
   untrack
 } from "./core.js";
-import { CONFIG_SLOT_NODE, STATUS_UNINITIALIZED } from "./constants.js";
+import {
+  CONFIG_OVERRIDE,
+  CONFIG_SLOT_NODE,
+  REACTIVE_REASK,
+  STATUS_PENDING,
+  STATUS_UNINITIALIZED,
+  EVENT_HANDLER_READ
+} from "./constants.js";
 import { NotReadyError } from "./error.js";
 import type { Computed, Link, Owner, Root, Signal } from "./types.js";
 
@@ -59,6 +67,7 @@ export type DiagnosticCode =
   | "REACTIVE_WRITE_IN_OWNED_SCOPE"
   | "ASYNC_STORE_SETTER"
   | "STORE_WRITE_OUTSIDE_SETTER"
+  | "STORE_WRITE_THROUGH_LOADING"
   | "ACTION_CALLED_IN_OWNED_SCOPE"
   | "RUN_WITH_DISPOSED_OWNER"
   | "NO_OWNER_CLEANUP"
@@ -100,6 +109,7 @@ export type DiagnosticCode =
   | "STACKED_HOLDS"
   | "OPTIMISTIC_REVERTED"
   | "OPTIMISTIC_WRITE_BEFORE_LOAD"
+  | "OPTIMISTIC_WRITE_WHILE_LOADING"
   | "EFFECT_WRITES_OWN_SOURCE"
   | "EFFECT_RELAY_TEAR"
   | "IMMUTABLE_UPDATE_IN_STORE"
@@ -124,6 +134,7 @@ export type DiagnosticCode =
   | "UNSCOPED_HOLE_ALLOCATED_IDS"
   | "LOWERCASE_EVENT_ATTRIBUTE"
   | "UNCOMMITTED_INPUT_OVERWRITTEN"
+  | "INVALID_HTML_NESTING"
   | "FRAME_MARKER_CORRUPTED"
   | "DYNAMIC_ASYNC_COMPONENT"
   | "ASYNC_MEMO_ELEMENT";
@@ -302,8 +313,9 @@ export interface AttributionSlot {
  * about where there is one — the node that ran for `rerun`, `create` and
  * `effect`, the async node for `flight`, the boundary's subtree for
  * `fallback` (when the boundary reported one), the first held root signal
- * for `hold` (the subject the SILENT_HOLD finding names) — and `undefined`
- * for the records with no single subject (`flush`, `interaction`,
+ * for `hold` (the subject the SILENT_HOLD finding names), the changed
+ * nodes for `flush` (`FlushLive`, with their values under `bodies`) — and
+ * `undefined` for the records with no single subject (`interaction`,
  * `navigation`, `graph`). The records are the same objects the engine's
  * ring buffers hold (`attribution.history(type)`), delivered synchronously
  * the moment each is complete — a re-run at recompute end, a hold, a
@@ -319,7 +331,7 @@ export interface RecordTypes extends HostRecordTypes {
   rerun: { event: RerunEvent; live: Computed<any> };
   create: { event: CreateEvent; live: Computed<any> };
   effect: { event: EffectRunEvent; live: Computed<any> };
-  flush: { event: FlushEvent; live: undefined };
+  flush: { event: FlushEvent; live: FlushLive };
   flight: { event: FlightEvent; live: Computed<any> };
   fallback: { event: FallbackEvent; live: Computed<any> | undefined };
   interaction: { event: InteractionEvent; live: undefined };
@@ -536,7 +548,7 @@ export interface Dev {
   /**
    * The URL of `code`'s page in the docs — what the finding means and how
    * to fix it, one page per code
-   * (`https://v2.solidjs.com/reference/solid-js/diagnostics/<slug>`, slug =
+   * (`https://docs.solidjs.com/reference/solid-js/diagnostics/<slug>`, slug =
    * the code lowercased with `-` for `_`). The one place the URL is built:
    * the console footer prints it and the performance tracks' Insights link
    * (`learnMoreUrl`) reads it, so both name the same page. Dev-tier: it is
@@ -787,10 +799,8 @@ export function isSuppressed(entry: DiagnosticEvent): boolean {
 
 // The repair guide: the `reactivity-diagnostics` skill `solid-js` ships,
 // one page per code on the docs site. The slug is the code lowercased with
-// `_` → `-` (`STRICT_READ_UNTRACKED` → `strict-read-untracked`). The host
-// flips to docs.solidjs.com at stable (one search-and-replace, with the JSDoc
-// links).
-const GUIDE_URL = "https://v2.solidjs.com/reference/solid-js/diagnostics/";
+// `_` → `-` (`STRICT_READ_UNTRACKED` → `strict-read-untracked`).
+const GUIDE_URL = "https://docs.solidjs.com/reference/solid-js/diagnostics/";
 
 export const DEV: Dev = __DEV__
   ? {
@@ -886,12 +896,10 @@ const OPTIMISTIC_WRITE_BEFORE_LOAD_MESSAGE =
   "Keep the pending items in a separate list (an outbox) until the source loads, " +
   "or disable the action until the source has loaded.";
 
-/** DEV (ruled 2026-11-03, #4656): an optimistic write to a derived
- * optimistic store whose first answer has not landed (`source`: the
- * store's derive). An optimistic memo no longer guards (S-56, 2026-11-07:
- * a guess before the first answer is the newest value the node produced
- * and shows); the store form keeps the guard until the store engine can
- * show such a guess — today its screen stays loading while an untracked
+/** DEV (#4656): an optimistic write to a derived optimistic store whose
+ * first answer has not landed (`source`: the store's derive). An optimistic
+ * memo does not guard (S-56); the store form keeps the guard until the store
+ * engine can show such a guess: its screen stays loading while an untracked
  * read sees the guess. Called under `__DEV__` only. */
 export function devGuardOptimisticBeforeLoad(source: Computed<any> | null | undefined): void {
   if (source && source._statusFlags & STATUS_UNINITIALIZED) {
@@ -903,6 +911,53 @@ export function devGuardOptimisticBeforeLoad(source: Computed<any> | null | unde
       data: { operation: "optimistic" }
     });
     throw new Error(OPTIMISTIC_WRITE_BEFORE_LOAD_MESSAGE);
+  }
+}
+
+const OPTIMISTIC_WRITE_WHILE_LOADING_MESSAGE =
+  "[OPTIMISTIC_WRITE_WHILE_LOADING] Optimistic write to a source that is loading a new question. " +
+  "The guess is an edit of the previous answer, and the new answer replaces it (D-34). " +
+  "Keep the control unavailable until the source has loaded (inside its `Loading`, or disabled " +
+  "while it is pending), or keep the pending change in a separate list until it lands.";
+
+/** A `refresh()` re-ask is the same question (D-34): its own, or every
+ * source the node waits on re-asked. */
+const reasked = (n: any): boolean =>
+  !!(n._flags & REACTIVE_REASK || n._x?._reask) ||
+  (!!n._x?._pendingSources?.size &&
+    [...n._x._pendingSources].every(
+      (s: any) => s !== n && (s._flags & REACTIVE_REASK || s._x?._reask)
+    ));
+const warnedWhileLoading = new WeakSet<object>();
+
+/** DEV (#4795): an optimistic write to a source that has
+ * answered before and is loading a new question (an input changed): the
+ * setter composes on the previous answer, and the new one replaces the
+ * guess (D-34). Not before the first answer (S-56: the setter gets
+ * `undefined`), not over a `refresh()` (the same question), not a node
+ * already carrying a guess. Once per source. Called under `__DEV__` only. */
+export function devWarnOptimisticWhileLoading(n: Computed<any> | null | undefined): void {
+  if (
+    n &&
+    (n._statusFlags & (STATUS_PENDING | STATUS_UNINITIALIZED)) === STATUS_PENDING &&
+    !(n._config & CONFIG_OVERRIDE) &&
+    !reasked(n) &&
+    !warnedWhileLoading.has(n)
+  ) {
+    warnedWhileLoading.add(n);
+    reportDiagnostic(
+      emitDiagnostic(
+        {
+          code: "OPTIMISTIC_WRITE_WHILE_LOADING",
+          kind: "write",
+          severity: "warn",
+          message: OPTIMISTIC_WRITE_WHILE_LOADING_MESSAGE,
+          nodeName: (n as any)._name,
+          data: { operation: "optimistic" }
+        },
+        n
+      )
+    );
   }
 }
 
@@ -1034,7 +1089,9 @@ export function throwPendingUntrackedRead(
 ): never {
   const message =
     `[PENDING_ASYNC_UNTRACKED_READ] Reading a pending async value directly in ${strictReadLabel}. ` +
-    `Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function).`;
+    (strictReadLabel === EVENT_HANDLER_READ
+      ? `Event handlers are not reactive: read the value inside the handler function instead.`
+      : `Async values must be read within a tracking scope (JSX, a memo, or an effect's compute function).`);
   emitDiagnostic({
     code: "PENDING_ASYNC_UNTRACKED_READ",
     kind: "async",
@@ -1055,10 +1112,17 @@ export function warnStrictReadUntracked(
   // restate what "reactive value" already says.
   const nodeName = fields?.nodeName;
   const named = nodeName !== undefined && nodeName !== "signal" && nodeName !== "computed";
+  const value = `[STRICT_READ_UNTRACKED] Reactive value${named ? ` "${nodeName}"` : ""} read `;
   const message =
-    `[STRICT_READ_UNTRACKED] Reactive value${named ? ` "${nodeName}"` : ""} read directly in ` +
-    `${strictReadLabel} will not update. ` +
-    `Move it into a tracking scope (JSX, a memo, or an effect's compute function).`;
+    strictReadLabel === EVENT_HANDLER_READ
+      ? // #1742: the read is tracked (the element re-mounts when it changes),
+        // but a handler is bound once: the repair is to read inside it.
+        value +
+        `in ${strictReadLabel}. Event handlers are not reactive: ` +
+        `read the value inside the handler function instead.`
+      : value +
+        `directly in ${strictReadLabel} will not update. ` +
+        `Move it into a tracking scope (JSX, a memo, or an effect's compute function).`;
   reportDiagnostic(
     emitDiagnostic({
       code: "STRICT_READ_UNTRACKED",

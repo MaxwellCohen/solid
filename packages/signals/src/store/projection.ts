@@ -30,6 +30,7 @@ import {
   addPendingSource,
   forEachDependent,
   handleAsync,
+  landBySetter,
   propagateStatus,
   settlePendingSource
 } from "../core/async.js";
@@ -37,7 +38,10 @@ import { enqueueSub } from "../core/heap.js";
 import { getOwner, isDisposed } from "../core/owner.js";
 import {
   insertSubs,
+  laneServedHook,
   observeFlightHook,
+  passLane,
+  setPassLane,
   question,
   schedule,
   setQuestion
@@ -265,7 +269,13 @@ export function runProjectionComputed<T extends object>(
   // this pass only: its reads set the posture again at its end, and a window
   // in it re-stamps it (`markVerdictReader`). Only the verdict engine makes
   // a verdict reader (`observeFlightHook`).
-  if (observeFlightHook && (fam._woke || fam.w)) ((fam.w = 0), (owner._config &= ~CONFIG_VERDICT));
+  // (Out of the hold's verdict lane too, where its seat put the pass — never
+  // out of a guess's lane: a derivation of a guess is that lane's, F-6.)
+  if (observeFlightHook && (fam._woke || fam.w)) {
+    fam.w = 0;
+    owner._config &= ~CONFIG_VERDICT;
+    if (passLane?._parent!._verdict === passLane) setPassLane(null);
+  }
   let result: void | T | Promise<void | T> | AsyncIterable<void | T>;
   // Open loading window (seedLoadingValue): the observable store IS commit #0
   // for the whole first flight — the derive works a detached shadow of the
@@ -317,8 +327,20 @@ export function runProjectionComputed<T extends object>(
             wrapCommit ? wrapCommit(write, v as T) : write();
           }
           // A landing (not the sync pass's own commit): the readers held
-          // pending on the derive settle.
-          if (!first || !(owner._statusFlags & STATUS_UNINITIALIZED)) settleFamily(fam);
+          // pending on the derive settle — unless core keeps the derive
+          // pending: lane work this pass served the committed value of a
+          // flight still in the air (core.ts `recompute`, #4862). The lane
+          // breaks out of the flight, the family's readers do not (F-4,
+          // #4927); they settle at the flight's landing.
+          if (
+            (!first || !(owner._statusFlags & STATUS_UNINITIALIZED)) &&
+            !(
+              laneServedHook &&
+              owner._statusFlags & STATUS_PENDING &&
+              laneServedHook(owner, null, true)
+            )
+          )
+            settleFamily(fam);
           // A commit is the derive's change for the readers that observed its
           // flight (linked by `pullFamily`; a settled pull does not link), as
           // a memo's landing is for its readers: one that caught the NotReady
@@ -328,7 +350,9 @@ export function runProjectionComputed<T extends object>(
           // every pass, a reader feeding a key the pass peeks at looped (#4342).
           if (wake) insertSubs(owner);
         };
-        const sync = handleAsync(owner, result, commit, (error, pending) => {
+        const land = (value: void | T, uninitialized: number, fail: (e: unknown) => void) =>
+          landBySetter(owner, value, commit, uninitialized, fail);
+        const sync = handleAsync(owner, result, land, (error, pending) => {
           // The flight rejected: the leaves' readers learn it from here —
           // they do not subscribe to the derive. Pending again (a NotReady
           // rejection): the wake, as for the pass. Errored: every live

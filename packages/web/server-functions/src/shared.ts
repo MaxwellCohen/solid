@@ -308,7 +308,8 @@ export function assertFlightSource(source) {
  * Registers the consumer the client transport delivers single-flight data
  * to. Subscribing is the single-flight opt-in: while any consumer is
  * registered the transport sends the request-leg `SINGLE_FLIGHT_HEADER` on
- * non-GET calls (GET reads stay plain and cacheable), asking the server's
+ * non-GET calls made while an action body runs (GET reads stay plain and
+ * cacheable; other calls are not mutations, #4913), asking the server's
  * collection hooks to fold data into the response. When a single-flight
  * response arrives, the transport decodes the standardized
  * `{ value, data }` payload, delivers the data (with the response as
@@ -324,7 +325,14 @@ export function assertFlightSource(source) {
  * opt-in for an integration that owns navigation or a cache: it applies
  * redirects and revalidation from the consumer, without wrapping the
  * call, and a redirect the server collected no data for (a cross-origin
- * target, no collector registered) still navigates.
+ * target, no collector registered) still navigates. A successful mutation
+ * that carries neither (nothing folded, no metadata) reaches every consumer
+ * too, `data` `undefined`, when an action made it: a non-read call made while
+ * an action body runs is a mutation, and the consumer applies its default —
+ * a router revalidates everything (#4883). Only such a call sends the
+ * request-leg header; one made outside an action (a query's fetcher, a
+ * lookup) asks for no collection and gets no default, though its explicit
+ * metadata still reaches the consumers (#4913).
  *
  * The one-argument form registers the unnamed consumer — the integration
  * that owns data production (a router), riding the keyed envelope under
@@ -422,8 +430,9 @@ export function hasFlightMetadata(response) {
  * value. Pending entries in the slices (values the collector folded while
  * still in flight, streamed after the response head) are settled before
  * any consumer runs. A consumer whose source was not folded is skipped —
- * unless the response carries integration metadata, in which case it runs
- * with `data` `undefined` to apply the metadata. Consumers are looked up
+ * unless the response carries integration metadata, or the server folded
+ * nothing at all (a plain mutation, #4883), in which case it runs with
+ * `data` `undefined` to apply the metadata or its default. Consumers are looked up
  * per delivery: an awaited consumer may unsubscribe another (a provider
  * tearing down under a navigation).
  *
@@ -442,10 +451,10 @@ export async function deliverFlightData(response, data) {
     await Promise.allSettled(
       Object.values(data).flatMap(s => (s && typeof s == "object" ? Object.values(s) : []))
     );
-  // An absent header splits to [""], which names no source (ids are never
-  // empty — see assertFlightSource), so no consumer matches it.
-  const folded = (response.headers.get(SINGLE_FLIGHT_HEADER) || "").split(",");
-  const metadata = hasFlightMetadata(response);
+  // A response the server folded nothing into (no header) is envelope-level
+  // like metadata: the mutation happened, and every consumer is told (#4883).
+  const folded = response.headers.get(SINGLE_FLIGHT_HEADER)?.split(",");
+  const metadata = !folded || hasFlightMetadata(response);
   for (const source of getFlightDataSourceIds()) {
     if (!metadata && !folded.includes(source)) continue;
     const consumer = getFlightDataConsumer(source);

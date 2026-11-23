@@ -40,7 +40,9 @@ pub(crate) struct DomTemplateState {
     pub(crate) uses_claim_element: bool,
     pub(crate) uses_set_property: bool,
     pub(crate) uses_set_stateful_property: bool,
+    pub(crate) uses_held_read: bool,
     pub(crate) uses_add_event_listener: bool,
+    pub(crate) uses_strict_handler: bool,
     pub(crate) uses_delegate_events: bool,
     pub(crate) uses_run_hydration_events: bool,
     pub(crate) delegated_events: std::vec::Vec<String>,
@@ -159,7 +161,9 @@ impl DomTemplateState {
             uses_claim_element: false,
             uses_set_property: false,
             uses_set_stateful_property: false,
+            uses_held_read: false,
             uses_add_event_listener: false,
+            uses_strict_handler: false,
             uses_delegate_events: false,
             uses_run_hydration_events: false,
             delegated_events: std::vec::Vec::new(),
@@ -257,8 +261,14 @@ impl<'a> AstDomTransform<'a, '_> {
             statements
                 .push(self.import_wrapper_helper("setStatefulProperty", "_$setStatefulProperty"));
         }
+        if self.template_state.uses_held_read {
+            statements.push(self.import_named("heldRead", "_$heldRead"));
+        }
         if self.template_state.uses_add_event_listener {
             statements.push(self.import_named("addEvent", "_$addEvent"));
+        }
+        if self.template_state.uses_strict_handler {
+            statements.push(self.import_named("strictHandler", "_$strictHandler"));
         }
         if self.template_state.uses_delegate_events {
             statements.push(self.import_named("delegateEvents", "_$delegateEvents"));

@@ -144,10 +144,10 @@ const externalizeFramesClient = {
 //     client rendered nothing (#3641);
 //   - its shared wire layer (framing, addressing, the streaming codec
 //     entry) — same instance as the handler's by the same reasoning;
-//   - the SSR runtime itself: compiled SSR output arms the select-value
-//     gate (`ssrSelectValues`) through `@solidjs/web`, and `renderToStream`
-//     reads it when it emits html — a bundled copy never saw the arming, so
-//     `<select value>` inside a server component streamed unresolved.
+//   - the SSR runtime itself: compiled SSR output renders through
+//     `@solidjs/web` (`ssr`, the owner tree, `ssrSelect` / `ssrOption`), and
+//     a bundled copy kept its own module state — `<select value>` inside a
+//     server component once streamed unresolved that way.
 //
 // Resolving those relative imports to the public server entries keeps
 // exactly one copy of each in an app and makes every seam agree by
@@ -317,19 +317,19 @@ export default [
   {
     input: "server-functions/src/client.ts",
     output: { file: "server-functions/dist/client.js", format: "es" },
-    external: ["seroval", "seroval-plugins/web"],
+    external: ["solid-js/internal", "seroval", "seroval-plugins/web"],
     plugins: [replaceDev(false)].concat(plugins)
   },
   {
     input: "server-functions/src/client.ts",
     output: { file: "server-functions/dist/client.observe.js", format: "es" },
-    external: ["seroval", "seroval-plugins/web"],
+    external: ["solid-js/internal", "seroval", "seroval-plugins/web"],
     plugins: [replaceFlags(false, true)].concat(plugins)
   },
   {
     input: "server-functions/src/client.ts",
     output: { file: "server-functions/dist/client.dev.js", format: "es" },
-    external: ["seroval", "seroval-plugins/web"],
+    external: ["solid-js/internal", "seroval", "seroval-plugins/web"],
     plugins: [replaceDev(true)].concat(plugins)
   },
   {

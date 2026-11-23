@@ -1,5 +1,7 @@
 # Async/Transition/Lane State Model — Working Notes
 
+> **Partly stale (checked 2026-11-18).** About a third of the fields and functions this file names no longer exist in `src/` (for example `CONFIG_HAS_LANE`, `LaneView`, `STORE_FIREWALL`). Where it disagrees with the code, the code wins; for behavior, the rules are `RULES-FUNDAMENTALS.md` and `RULES-DERIVED.md`. The §5 `INV-<n>` invariants are still the ones `invariants.ts` asserts.
+
 > **Index:** every rule ID cited from `src/` or `tests/` — this file's A/B/C/V ids, the INV/RUL/R/§ vocabularies of the internals and rules-mining docs — is listed with status, definition and citations in [`RULES-INDEX.md`](./RULES-INDEX.md) (generated; `node scripts/rules-index.mjs`). IDs are never renumbered.
 
 Living document for the pending/transition/optimistic-lane machinery in
@@ -13,7 +15,7 @@ ruling. Anything marked `[ruled]` cites the decision.
 
 ## 0. L2 — the hold model (2026-10-04): what replaced §1–§4
 
-**Status: `[ruled]`** (the carve, 2026-09-30 → 2026-10-03; `documentation/plans/size-reduction-carve-step1.md` sections 8, 10, 16–21, 27–29, 31–35, 38–41 are the dated record). §1–§4 below describe the implementation this file was written against — transitions with `_asyncReporters`, lanes with `_overrideValue`/`signalLanes`, companions, the store's `_firewall` chain — and are kept for the reasoning record. They are not the running code. The invariants of §5 that name those fields are retired with them; the rules they protected are restated in `SPEC-ASYNC-SEMANTICS.md` ("The hold model — L2") and pinned by the tests named there.
+**Status: `[ruled]`** (the carve, 2026-09-30 → 2026-10-03; `documentation/archive/plans/size-reduction-carve-step1.md` sections 8, 10, 16–21, 27–29, 31–35, 38–41 are the dated record). §1–§4 below describe the implementation this file was written against — transitions with `_asyncReporters`, lanes with `_overrideValue`/`signalLanes`, companions, the store's `_firewall` chain — and are kept for the reasoning record. They are not the running code. The invariants of §5 that name those fields are retired with them; the rules they protected are restated in `SPEC-ASYNC-SEMANTICS.md` ("The hold model — L2") and pinned by the tests named there.
 
 **State.** A node is `_value` (committed) or `_pendingValue` (staged for this flush). Cold state lives on the node's extension `_x`: `_transaction` (the `Transaction` holding it, `CONFIG_HELD`), `_lane` (a lane's value for it, `CONFIG_OVERRIDE`; `CONFIG_GUESS` for a written guess), `_q` (the question a flight answers — A18 provenance), `_reask` (a quiet re-ask's classification, A19 exc. 2), `_marks` (`affects()` count), `_pendingSources`/`_inFlight`/`_error` (the async core, unchanged). Per-pass flags on `_flags`: `REACTIVE_JOINED` (the pass read the future), `REACTIVE_FRAME_READ` (a stale reader, re-derived at the landing), `REACTIVE_STAGED_READ` (the pass read this flush's staging as the screen), `REACTIVE_LANE_READ`/`REACTIVE_SCREEN_READ` (lane work), `REACTIVE_PROBE_UNANSWERED` (a verdict probe answered before the flush had a transaction), `REACTIVE_REASK`, `REACTIVE_ZOMBIE` (a parked frame's child).
 
@@ -258,7 +260,7 @@ Confidence: **high** = implementation self-consistency, assert now.
   latest-1 #2481: a boundary reset re-ran a lane-born memo). A fresh lane
   publish clears `CONFIG_OVERRIDE_SUPERSEDED` for the same reason.
 - **INV-seat family (medium, recording — `core/seat.ts`, S0 of
-  `documentation/plans/reader-seat-rebuild.md`)** The reader-seat shadow:
+  `documentation/archive/plans/reader-seat-rebuild.md`)** The reader-seat shadow:
   under `__TEST__` every `read` computes the old deciders' answer and the
   new `slot()` beside it, and every `recompute` opens a seat beside the
   old head seating. Mismatches are recorded (registry, `SEAT_SHADOW_REPORT`
@@ -325,6 +327,143 @@ The findings that used to follow here (§5a–§5h, 2026-07-06 → 2026-07-16) a
 
 ## 7. Decision log
 
+- 2026-11-21: **A reader waiting only on re-asks follows a guess it reads**
+  (D-34's new sentences). When a guess is written, `laneDirty`
+  (scheduler.ts) seats the readers that are already waiting, before their
+  pass: a pass that reads the hold's flight before the guess throws there
+  and never reaches the guess. Which readers it seated had grown one case
+  at a time (#4629, #4666, #4577, #4824, #5113): a render effect on
+  re-asks, unless a lane already listed it; a memo on re-asks, but only if
+  some hold held it; a memo of the guess's own hold on any question; a
+  user effect never. Counting every reader the walk met across the suite
+  showed one rule under it with three odd cells (a memo nothing holds, a
+  user effect, a render effect another lane lists, each waiting only on
+  re-asks). Now the condition is the rule: waiting only on re-asks
+  (`reasks`), or a memo the guess's own hold holds. A reader in another
+  lane whose removal is staged is also re-staged by the guess, as it is
+  still on screen (D-9, #5095). No test and no generator case (150,000)
+  shows a different screen for the three cells, and no app shape tried
+  reaches them; they follow the rule because nothing separates them from
+  the readers beside them.
+- 2026-11-20b: **Overlap means merge, with no exception for an optimistic
+  input** (D-33's new sentence, ruled the same day; D-34's S-44 clause
+  now covers both kinds of write). Before, a lane pass over a node that
+  carried another hold's guess _took_ the slot: the guess left the screen
+  and the node became the lane's derivation (`take`), the guess was set
+  aside (`kept`) and given back if the taking lane reverted
+  (`revertLanding`, #4336's second half). With an optimistic filter over a
+  list that had adds in flight, the pending rows vanished and came back
+  when the adds landed. Now the two holds merge at that point (lanes.ts
+  `laneStage`; a store's carrier, store/optimistic.ts `_slotMerge`): the
+  lane is held with the merged hold (`over`, `_held` set at once so a
+  reader seated in the other lane stays on the screen), and the pass is the
+  hold's question, judged as a frame pass (`laneOutcome`), exactly as a
+  plain write of the input already was. `take`, `kept`, `revertLanding`,
+  their two hooks and the lane half of `marked` are deleted. Known
+  residue: after such an optimistic change reverts, the merged hold's
+  refresh still asks the reverted question once. The seat table's row L6
+  still describes the take (one shadow class, the re-pinned tests).
+- 2026-11-20: **A node stores two values; a lane stores a guess it has not
+  revealed** (the value model in the root `AGENTS.md`; F-11, F-6; no rule or
+  screen changes). Ruled the same day: one pending value per hold, a lane is
+  a hold of its own over its action, the lane's waiting guess is the one
+  value beside a node's two. Before, a guess's node kept more: the lane's
+  record (`covers`) held the guess until its reveal and then the value it
+  covered, also for lane derivations; a re-asked shown guess was written to
+  `_value` at once with a note of what the screen showed (`screens`, #4775).
+  Now `_value` is always the screen. `reveal` (lanes.ts) moves a waiting
+  guess from `covers` to `_value` and, with nothing staged beneath, stages
+  the value it showed over as `_pendingValue`: the revert is the hold's
+  write. `_x._revert` marks that staging, so `landed` (truth.ts) can tell a
+  truth that landed beneath the guess from the value it reverts to; the held
+  flag cannot (a same-tick truth lacks it, a refresh sets it). A re-asked
+  shown guess waits in `covers` (`setLaneValue`'s `wait`), still judged a
+  round later (`_reguessed`). A guess that becomes its lane's derivation
+  drops both (`laneStage`). `recompute`'s re-ask test ignores a staged
+  revert. `kept` (#4336) is unchanged. Census over the signals suite, nodes
+  at rest holding three values: 3,200 before, 21 after (16 a waiting guess,
+  3 `kept`).
+- 2026-11-12b: **A pass that asks reads ahead on the screen (C)** (S-51
+  re-ruled; F-2's producer clause and F-6's limit of 2026-11-07 replaced;
+  #4677, #4778). The producer clause made a pass that asks the hold's:
+  `isPending`/`latest` meant one thing in a render effect or a sync memo
+  and another in an async memo, and a memo between the read and the async
+  changed the answer again (#4778, patched the same morning by `readBy`).
+  Ruled: one meaning. An async pass that reads ahead runs on the screen as
+  a sync pass does; the lane gets the screen's question, the hold the
+  frame's. Removed: `askerJoins` and its hook, the asker arms of
+  `frameRead`, `read` and `verdictValue`, `laneDirty`'s display skip, the
+  posture line's CONFIG_ASYNC case, `readBy`, the seat table's V0/Vp0 rows,
+  and the generator's `truth-asks` oracle (it encoded the clause). What
+  replaces "asks once, of the truth" is R5 for async readers, extended:
+  - **Park-block** (verdict.ts `park`, `parkUp`; lanes.ts `lanesBlocked`): the frame
+    flight the seam parks is the hold's question, so the hold waits on it
+    while a reader on screen waits on it (judged as `blockedBy` judges a
+    frame reader: a render effect pending or served the screen, a boundary
+    showing content; a memo's stale read is no screen, #4504). Without it
+    a lane pass that settled first left the hold nothing to wait on and
+    the write landed ahead of its answer (#3884). `isPending` of a lane
+    node counts a parked flight of its hold (`verdictValue`).
+  - **Re-ask** (verdict.ts `reask`, `leave`, `seat`, `left`;
+    core.ts `recompute`'s head, `laneAdoptHook(el, 2)`): a later frame
+    write reaching a parked reader, or a lane derivation it reads,
+    supersedes the parked question. The reader's pass is the frame's again
+    — out of the lane with the lane members it reads, windows answered for
+    the hold's world (`markVerdictReader`) — and the seam parks the new
+    flight and re-derives for the lane. Before this, on `next`,
+    `data = async(source(), memo(latest(source)))` asked the first write's
+    question only and ended on its answer beside the second write.
+  - **Adoption at the heap visit** (`adoptParked(r, 1)`, `armed`, `arm`;
+    `GlobalQueue._update`): the landing arms a parked reader, and the memos
+    over a sync verdict memo it re-derives; armed, the reader adopts the
+    parked flight at its turn even though that memo's flip dirtied it. The
+    memo-extracted forms ask as few times as inline.
+  - **A verdict memo's answer for this frame** (verdict.ts `holdStaging`,
+    D-22): a memo reading a sync verdict memo's value staged this flush
+    reads it plainly. Served the screen because another pass's pending had
+    opened the hold first, an async reader asked the question it already
+    had the answer to, and the landing showed that answer beside the write.
+  - `reruns` holds the release for every re-derivation (`frame = 1`): a
+    memo over a re-derived verdict memo may ask.
+  - Store form (D-30): `pullFamily` reads a pending verdict-only derive's
+    flights as the memo's reader would, so a branch mounted ahead is born
+    held on them (S-46); the marked derive pass leaves its lane seat
+    (#4491).
+    Pins: `tests/async-reads-ahead-matrix.test.ts` (192 rows: shape × kind ×
+    holder × order of answers), `tests/async-reads-ahead-second-write.test.ts`,
+    the rewritten #4778 pin; five pins reverted to their pre-2026-11-07
+    screens (`verdict-memo-flight-no-reask`, #4393, #4402, #4504, #4491), two
+    request orders updated. Costs, stated in S-51: the screen's question is
+    asked beside the frame's; the lane's reveal, a sibling `isPending` hole
+    included, waits for it; a mixed plain-read-plus-extracted-window reader
+    that runs after another pass opened the hold asks the screen's question
+    twice (pinned in the matrix as today's cost). The entry below is
+    superseded where it speaks of an async derivation and of `readBy`.
+- 2026-11-12: **A memo's posture follows its readers** (#4776, #4778;
+  D-25, S-51; one version per node, #3905 out of scope). Before, a memo
+  that inherited a verdict posture (it read `latest`/`isPending` through a
+  verdict memo, probing nothing itself) became the hold's work by its own
+  reads: reading the hold's own sync write (`holdStaging`, the #4544 fix).
+  That kept #4544's branch right, but a memo only the screen read fell
+  behind the inline form (#4776: `1 / 0` where the inline form and a guess
+  show `2 / 0`). Now the readers decide. core.ts `read`: a pass of the
+  hold's own world — born into it, a member of a frame a held pass built,
+  or an async derivation (CONFIG_ASYNC) — reading a verdict memo stamps it
+  `_x._readIn` with that hold and re-derives it at once; `holdStaging`
+  requires the stamp. An async reader stamps a memo that probes in its own
+  body too, and verdict.ts's two asker arms treat a stamped memo as an
+  asker (`readBy`): its probe is answered in the hold's world, so the async
+  asks once, of the truth (#4778; the display behind that memo shows the
+  hold's answer). A memo read only by the display reads as its inline form:
+  the 17 S9 rows of posture-store-parity now pin parity with the inline
+  probe, and #4544's "earlier hold" rows read the screen's `x` mid-hold.
+  The stamp expires with the hold (compared by `resolveTx`). Core floor
+  0 B. Known, not changed here: the landing frame of
+  `[latest(x), x()]` / `isPending` in a memo shows the stale `x` for one
+  frame before the memo re-derives, inline form included (follow-up); and
+  a guess-derived memo read by a hold's branch still tears (#4544's shape
+  with `createOptimistic`, follow-up).
+
 - 2026-11-10: **The lane engine split along the guess boundary** (the
   §8.6 split, b3926358b, ported onto today's `lanes.ts`; a module boundary,
   no rule). `lanes.ts` keeps the sub-hold core every lane needs — the lane
@@ -353,7 +492,7 @@ The findings that used to follow here (§5a–§5h, 2026-07-06 → 2026-07-16) a
   every floor and plain-store scenario 0 B, `hydrating + every store
 primitive family` (both halves) +15 B brotli / +157 B minified. Suites,
   the seat shadow and 50k × 3 seeds against `next`'s recording: no screen
-  moves (documentation/plans/reader-seat-rebuild.md §9.3).
+  moves (documentation/archive/plans/reader-seat-rebuild.md §9.3).
 - 2026-11-09: **A store guess is one node — the guess carrier** (S2's
   shape, ported onto `next` without S1's staging; D-33's point-of-write
   clause, S-59, #4724). Before, an optimistic setter was scattered into the
@@ -900,7 +1039,7 @@ Sixteen rules folded into nine absorbers (D-1, D-9, D-12, D-17, D-23, D-25, D-33
 
 **From:** F-2, F-1, F-7. **Rows:** S-3, S-6, S-31. **Pins also:** `tests/born-held.test.ts`, `tests/issue-3800-repro.test.ts`, `tests/verdict-mount-first-pass-3851.test.ts`.
 
-A memo or render effect is the hold's when a pass of it reads a value the hold holds — its first pass included — never because it was created while the hold was open. Born held, it has no answer until the commit: a plain read of it throws, `latest` of it shows what it produced, and a render effect that reads it holds the change that mounted it, so the branch attaches whole at the commit, never around an empty slot — unless a fresh boundary catches the read (F-4). A first pass that reads this flush's staging is born held when the flush parks, whoever opened the branch (ruled 2026-11-05, decision 4 in `documentation/plans/optimism-seam-spike-brief.md` §8).
+A memo or render effect is the hold's when a pass of it reads a value the hold holds — its first pass included — never because it was created while the hold was open. Born held, it has no answer until the commit: a plain read of it throws, `latest` of it shows what it produced, and a render effect that reads it holds the change that mounted it, so the branch attaches whole at the commit, never around an empty slot — unless a fresh boundary catches the read (F-4). A first pass that reads this flush's staging is born held when the flush parks, whoever opened the branch (ruled 2026-11-05, decision 4 in `documentation/archive/plans/optimism-seam-spike-brief.md` §8).
 
 **Status:** standing. Mechanism and history: `INTERNALS-ASYNC-STATE.md` §7, the 2026-11-06 entry.
 

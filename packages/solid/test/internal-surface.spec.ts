@@ -36,6 +36,9 @@ const INTERNAL = [
   "inServerComponentScope",
   "creationStamp",
   "getProjectionTrace",
+  // compiler output: grouped effects skip an unchanged stateful prop (#4872)
+  "heldRead",
+  "actionDepth",
   // boundary primitives behind Errored/Loading/Reveal (#3709)
   "createErrorBoundary",
   "createLoadingBoundary",

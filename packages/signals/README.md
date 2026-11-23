@@ -2,7 +2,7 @@
 
 The reactive core that powers [SolidJS 2.0](https://github.com/solidjs/solid). It is developed in the Solid monorepo and includes first-class support for async, transitions, optimistic updates, and deeply reactive stores that go beyond what general-purpose signals libraries offer.
 
-> **Status:** Release Candidate — this package is the reactive foundation of SolidJS 2.0. The API is frozen barring showstoppers before the final release.
+> This package is the reactive foundation of SolidJS 2.0.
 
 ## Installation
 
@@ -120,7 +120,7 @@ const save = action(function* (item) {
 });
 ```
 
-Navigation-shaped updates don't need an action. A plain setter call is enough — reads pull the async, downstream async computeds hold their previous values until new ones are ready, and `isPending`/`latest` expose the in-flight state. Reach for `action` when writes happen *after* async work (pairing with optimistic primitives for tentative state that reverts on failure), not when the async is merely downstream of a synchronous write.
+Navigation-shaped updates don't need an action. A plain setter call is enough — reads pull the async, downstream async computeds hold their previous values until new ones are ready, and `isPending`/`latest` expose the in-flight state. Reach for `action` when writes happen *after* async work (pairing with optimistic primitives for guesses shown while the action runs; they revert when it settles, and what stays is the truth the action writes or refreshes), not when the async is merely downstream of a synchronous write.
 
 Framework-level actions (router form actions, server actions) are specializations of this primitive: the same transactional semantics with form binding, serialization, and submission tracking layered on top.
 

@@ -1,5 +1,7 @@
 # RFC: Stores
 
+> **Frozen design record (2.0.0, 2026-11-17).** This RFC is history: it records why 2.0 is shaped this way, and later changes are not folded back in. Current behavior is on the docs site (https://docs.solidjs.com), in [`MIGRATION.md`](MIGRATION.md) and, for async semantics, in `packages/signals/docs/RULES-FUNDAMENTALS.md` / `RULES-DERIVED.md`.
+
 **Start here:** If you’re migrating an app, read the migration guide first: [MIGRATION.md](MIGRATION.md)
 
 ## Summary
@@ -200,7 +202,35 @@ Unchanged slots skip by reference equality (a partial payload that reuses row ob
 
 `shallow` is also accepted by `createProjection` and `createOptimisticStore`. Optimistic writes compose cleanly with the replacement contract: a tentative record replacement stages in the overlay, shows immediately, and reverts to the untouched original — the base records are never mutated.
 
+It is also how to keep a value out of tracking. `Object.freeze` does not do that: stores never write to their sources, so a frozen plain object or array wraps and tracks like any other (writes go through the setter and leave the frozen source untouched). Libraries that freeze their state, such as XState in development, stay fine-grained.
+
 When *not* to use it: state you edit field-by-field (forms, editors, sparse in-place mutation). That is exactly what the default deep store is optimal for — shallow trades leaf granularity for record-granularity throughput, and re-runs all of a record's bindings when the record is replaced.
+
+### Class instances in stores
+
+A class instance inside a store is wrapped like a plain object: its fields are tracked, and `instanceof` and `constructor` still answer the class.
+
+- **Getters and methods run on the store.** `this` is the store proxy, so a getter or method tracks the fields it reads.
+- **Writes go through a setter.** A method called on the draft inside a setter writes through the store and notifies as usual. Called outside a setter, its writes are ignored, like any other write to a store.
+
+```js
+class Cart {
+  items = [];
+  get total() {
+    return this.items.reduce((sum, item) => sum + item.price, 0);
+  }
+  add(item) {
+    this.items.push(item);
+  }
+}
+
+const [store, setStore] = createStore({ cart: new Cart() });
+
+<p>{store.cart.total}</p>; // updates when items change
+setStore(s => s.cart.add({ price: 3 })); // reactive write through the draft
+```
+
+An object that manages its own state (an actor, a client, an emitter) needs its own writes to land on it. Keep it out of the store, or hold it in a `shallow` store, which keeps its values raw.
 
 ### `snapshot(store)` (replaces `unwrap`)
 

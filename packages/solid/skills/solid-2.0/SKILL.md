@@ -70,9 +70,15 @@ Also:
   compute once to track reads with fake `Promise`/`fetch` that never settle.
   Never store a promise or `import()` created inside a compute in a cache
   that outlives it; cache resolved values, or start the load outside.
-- No reactive reads at the top of a component body; read in JSX, a memo, or
-  `untrack`. Flow callbacks (`<For>`, `<Show>`, `<Match>`) are owners, not
-  tracking scopes: read their accessor arguments in JSX, not at the top.
+- No reactive reads at the top of a component body; read in JSX, a memo, an
+  effect's compute, or hand a hook an accessor (`useThing(() => props.id)`;
+  JSX props still take values). Flow
+  callbacks (`<For>`, `<Show>`, `<Match>`) are owners, not tracking scopes:
+  read their accessor arguments in JSX, not at the top.
+- Never use `untrack` to silence `STRICT_READ_UNTRACKED`: the value still
+  goes stale, and the warning was the only sign. Move the read instead (see
+  that code's section in the diagnostics skill). Hooks and adapters take
+  accessors and read them inside their own memos and effects.
 - `<For>`: default gives a raw item and an index accessor; `keyed={false}`
   gives an item accessor and a plain number. `<Repeat>`: `i` is a number.
 - `onClick={cond() ? a : b}` binds once; decide inside a stable handler.
@@ -117,6 +123,6 @@ Also:
   `costs`, `end`).
 - Lint: `eslint-plugin-solid`, config `v2`
   (`import solid from "eslint-plugin-solid/configs/v2"`) or `v2-strict`.
-- Docs: https://v2.solidjs.com (Solid 2.0 docs; `/llms.txt` and
+- Docs: https://docs.solidjs.com (Solid 2.0 docs; `/llms.txt` and
   `/llms-full.txt` for agents). Migration guide: `documentation/solid-2.0/MIGRATION.md`
   in the repository.

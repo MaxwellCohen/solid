@@ -66,7 +66,7 @@ export function from<T>(source: FromSource<T>): AsyncIterable<T> {
     }
   });
 }
-export { snapshot, omit, storePath, isStatic, $PROXY, $TRACK } from "@solidjs/signals";
+export { snapshot, omit, storePath, isStatic, markRaw, $PROXY, $TRACK } from "@solidjs/signals";
 
 // === Type re-exports ===
 
@@ -540,6 +540,23 @@ export function setContext<T>(
 // Without this, the parent still points at the pooled node, and once the
 // pool recycles it into a *different* tree, disposing the old parent walks
 // into the new tree and tears down live owners (#2863).
+/**
+ * Returns a disposed owner to the pool. The next `createOwner` overwrites
+ * every field, so only references that would keep the finished render alive
+ * are dropped here: `_context` holds the render's provided values (and, under
+ * a boundary, its error handler and HTML), and a pooled owner can sit idle
+ * for as long as the process runs while concurrent renders fill the pool
+ * (#4890). `_parent` / `_nextSibling` are cleared by `unlinkOwner`,
+ * `_firstChild` / `_disposal` by the dispose walk.
+ */
+function recycleOwner(node: SSROwner): void {
+  if (ownerPool.length < OWNER_POOL_MAX) {
+    node.id = undefined;
+    node._context = defaultSSRContext;
+    ownerPool.push(node);
+  }
+}
+
 function unlinkOwner(node: SSROwner): void {
   const parent = node._parent;
   if (!parent) return;
@@ -579,10 +596,7 @@ export function disposeOwner(owner: Owner, self: boolean = true): void {
     if (self) {
       node._disposed = true;
       unlinkOwner(node);
-      if (ownerPool.length < OWNER_POOL_MAX) {
-        node.id = undefined;
-        ownerPool.push(node);
-      }
+      recycleOwner(node);
     } else {
       // Id slots can be consumed without creating child owners
       // (createUniqueId, ssrScope reservations, client-computed slots), so a
@@ -632,12 +646,8 @@ export function disposeOwner(owner: Owner, self: boolean = true): void {
   }
   if (self) unlinkOwner(node);
   // Recycle the disposed owner. Skip the root case (`self=false`) and the
-  // already-pooled case so we don't double-add. The next `createOwner` will
-  // overwrite all fields, so we only need to drop heavy references here.
-  if (self && ownerPool.length < OWNER_POOL_MAX) {
-    node.id = undefined;
-    ownerPool.push(node);
-  }
+  // already-pooled case so we don't double-add.
+  if (self) recycleOwner(node);
   if (error) throw error[0];
 }
 
@@ -1153,6 +1163,11 @@ const SLOTS = /* @__PURE__ */ Symbol("settledSlots");
 // across retry passes join the in-flight instance instead of allocating a
 // fresh one per pass. Same lifetime and keying rationale as SLOTS above.
 const PROJECTION_SLOTS = /* @__PURE__ */ Symbol("projectionSlots");
+
+// A retry pass adopts or joins a slot without serializing it again (#4809).
+export function hasAsyncSlot(ctx: object, id: string): boolean {
+  return !!((ctx as any)[SLOTS]?.[id] || (ctx as any)[PROJECTION_SLOTS]?.[id]);
+}
 
 function adoptSlot(comp: ServerComputation<any>, slot: SlotRecord) {
   if (slot.s === 1) {
@@ -3166,6 +3181,17 @@ export function createProjection<T extends object = {}>(
   let result: void | T | Promise<void | T> | AsyncIterable<void | T>;
   try {
     result = runProjection();
+    // Synchronous: fn either mutated state directly (void) or returned a new
+    // value. Adopted here, a pending store it returns (`() => rows`) takes
+    // the NotReady retry below like a derive that read it (#5097).
+    if (
+      result !== undefined &&
+      result !== state &&
+      result !== draft &&
+      !isThenable(result) &&
+      typeof (result as any)[Symbol.asyncIterator] !== "function"
+    )
+      replaceState(state, result as T);
   } catch (error) {
     if (!(error instanceof NotReadyError)) throw error;
     // The derive read a client hole synchronously: FINAL at discovery, the
@@ -3181,16 +3207,33 @@ export function createProjection<T extends object = {}>(
     const deferred = createDeferredPromise<T>();
     const [pending, markReady, markError] = createPendingProxy(state, deferred.promise);
     if (seedLoading) markReady(frozenSeed);
+    // Sync derives that only waited on a pending source must not serialize:
+    // on the client they run live against their hydrated source (#5146).
+    // Serialize only when commit #0 was served as seed, or when retry yields
+    // its own async result (Promise / AsyncIterable).
+    let serialized = false;
+    const serializeOnce = () => {
+      if (serializes && !serialized) {
+        serialized = true;
+        ctx.serialize(id, deferred.promise, options?.deferStream);
+      }
+    };
+    if (seedLoading) serializeOnce();
     settleServerAsync<void | T, T>(
       Promise.reject(error),
-      () => normalizeAsync(runProjection()),
+      () => {
+        const res = runProjection();
+        if (isThenable(res) || typeof (res as any)?.[Symbol.asyncIterator] === "function") {
+          serializeOnce();
+        }
+        return normalizeAsync(res);
+      },
       deferred,
       settleWith(markReady),
       markError,
       () => disposed
     );
     registerSettledTrace(pending, deferred.promise, state, options?.shallow);
-    if (serializes) ctx.serialize(id, deferred.promise, options?.deferStream);
     return recordSlot(pending);
   }
 
@@ -3396,10 +3439,6 @@ export function createProjection<T extends object = {}>(
     return recordSlot(pending);
   }
 
-  // Synchronous: fn either mutated state directly (void) or returned a new value
-  if (result !== undefined && result !== state && result !== draft) {
-    replaceState(state, result as T);
-  }
   return state;
 }
 
@@ -4813,6 +4852,11 @@ export function onFlush(_callback: () => void): void {}
 /** @internal Refs never run on the server; parity with the client entry (#4761). */
 export function runRefCallback(fn: () => void): void {
   untrack(fn);
+}
+
+/** @internal Handlers are never bound on the server; parity with the client entry (#1742). */
+export function strictReadTracked<T>(fn: () => T, _label: string): T {
+  return fn();
 }
 
 // NoInfer utility type (also re-exported from signals, but define for local use)

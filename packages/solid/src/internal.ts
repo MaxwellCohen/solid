@@ -45,6 +45,13 @@ import type {
 } from "solid-js";
 import type { HydrationContext } from "./server/shared.js";
 
+/**
+ * Server function transport (`@solidjs/web`, #4913): the action bodies on
+ * the stack, read live. A call made while it is nonzero is the action's
+ * mutation and asks for the default revalidation. Server: always `0`.
+ */
+export { actionDepth } from "@solidjs/signals";
+
 export {
   mergeSources,
   mergeView,
@@ -125,6 +132,13 @@ export type { ServerErrorSite, ServerErrorHook } from "solid-js";
 
 /** Server: a monotonic stamp for owner creation order. Client: `0`. */
 export const creationStamp: () => number = core.creationStamp;
+
+/**
+ * Compiler output (`@solidjs/web`'s grouped effects, #4872): truthy while the
+ * running pass is a stale reader of an open hold, so an unchanged stateful DOM
+ * prop is not written again. Server: `0`.
+ */
+export const heldRead: () => number = core.heldRead;
 
 /**
  * Client: set (or clear, `null`) a callback run before every signal or store

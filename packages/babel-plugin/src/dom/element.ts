@@ -1,4 +1,5 @@
 import * as babelTypes from "@babel/types";
+import { decode } from "html-entities";
 
 const t = babelTypes;
 
@@ -489,6 +490,27 @@ export function setAttr(
   }
 }
 
+/**
+ * Dev DOM output reads an event handler expression that can read reactive
+ * state (anything but an identifier, a function or a literal) through
+ * `strictHandler(() => expr)` (#1742): a handler is bound once, where its
+ * element is created, so the dev runtime warns on a reactive read there while
+ * tracking it as production does. Production output keeps `expr`, byte for
+ * byte. Mirrored by the native compiler's `strict_handler` (dom/events.rs).
+ */
+function strictHandler(
+  path: BabelPath,
+  config: { dev?: boolean },
+  handler: babelTypes.Expression
+): babelTypes.Expression {
+  if (!config.dev || t.isIdentifier(handler) || t.isFunction(handler) || t.isLiteral(handler))
+    return handler;
+  return t.callExpression(
+    registerImportMethod(path, "strictHandler", getRendererConfig(path, "dom").moduleName),
+    [t.arrowFunctionExpression([], handler)]
+  );
+}
+
 function detectResolvableEventHandler(
   attribute: BabelPath,
   handler: babelTypes.Expression
@@ -702,7 +724,7 @@ function transformAttributes(
     };
     let i = 0,
       leading = styleValue.expression.leadingComments;
-    styleValue.expression.properties.slice().forEach((p, index) => {
+    styleValue.expression.properties.slice().forEach(p => {
       if (!t.isObjectProperty(p)) return;
       if (!p.computed) {
         if (leading) p.value.leadingComments = leading;
@@ -723,7 +745,7 @@ function transformAttributes(
         path
           .get("openingElement")
           .node.attributes.splice(Number(styleObjectAttribute.key) + ++i, 0, newAttr);
-        styleValue.expression.properties.splice(index - i - 1, 1);
+        styleValue.expression.properties.splice(styleValue.expression.properties.indexOf(p), 1);
       }
     });
     if (!styleValue.expression.properties.length)
@@ -807,7 +829,7 @@ function transformAttributes(
         .get("value")
         .get("expression")
         .get("properties") as BabelPath[];
-    classListProperties.slice().forEach((propPath, index) => {
+    classListProperties.slice().forEach(propPath => {
       const p = propPath.node;
       if (!t.isObjectProperty(p)) return;
       const { confident, value: computed } = propPath.get("value").evaluate();
@@ -846,7 +868,7 @@ function transformAttributes(
             )
           );
       }
-      classListProperties.splice(index - i - 1, 1);
+      classListProperties.splice(classListProperties.indexOf(propPath), 1);
     });
     if (!classListProperties.length)
       path.get("openingElement").node.attributes.splice(Number(classListAttribute.key), 1);
@@ -1124,7 +1146,7 @@ function transformAttributes(
                     t.assignmentExpression(
                       "=",
                       t.memberExpression(elem, t.identifier(`_$$${ev}Data`)),
-                      handler.elements[1] as babelTypes.Expression
+                      strictHandler(path, config, handler.elements[1] as babelTypes.Expression)
                     )
                   )
                 );
@@ -1135,7 +1157,7 @@ function transformAttributes(
                   t.assignmentExpression(
                     "=",
                     t.memberExpression(elem, t.identifier(`_$$${ev}`)),
-                    handler
+                    strictHandler(path, config, handler)
                   )
                 )
               );
@@ -1158,7 +1180,12 @@ function transformAttributes(
                       "addEvent",
                       getRendererConfig(path, "dom").moduleName
                     ),
-                    [elem, t.stringLiteral(ev), handler, t.booleanLiteral(true)]
+                    [
+                      elem,
+                      t.stringLiteral(ev),
+                      strictHandler(path, config, handler),
+                      t.booleanLiteral(true)
+                    ]
                   )
                 )
               );
@@ -1175,7 +1202,8 @@ function transformAttributes(
                     t.identifier("e")
                   ])
                 );
-              } else handler = handler.elements[0] as babelTypes.Expression;
+              } else
+                handler = strictHandler(path, config, handler.elements[0] as babelTypes.Expression);
               results.exprs.unshift(
                 t.expressionStatement(
                   t.callExpression(t.memberExpression(elem, t.identifier("addEventListener")), [
@@ -1202,7 +1230,7 @@ function transformAttributes(
                       "addEvent",
                       getRendererConfig(path, "dom").moduleName
                     ),
-                    [elem, t.stringLiteral(ev), handler]
+                    [elem, t.stringLiteral(ev), strictHandler(path, config, handler)]
                   )
                 )
               );
@@ -1342,6 +1370,23 @@ function countDynamicSlots(children: JSXChildPath[]): number {
   return count;
 }
 
+function leadingLineBreakChildren(tagName: string, children: JSXChildPath[]): number {
+  if (tagName !== "pre" && tagName !== "listing") return 0;
+  let html = "",
+    count = 0;
+  for (const child of children) {
+    if (t.isJSXText(child.node)) {
+      html += trimWhitespace((child.node.extra?.raw as string | undefined) ?? "");
+    } else {
+      const value = getStaticExpression(child as BabelPath<babelTypes.JSXExpressionContainer>);
+      if (value === false) break;
+      html += escapeHTML(String(value)) as string;
+    }
+    count++;
+  }
+  return decode(html.replace(/\r\n?/g, "\n")) === "\n" ? count : 0;
+}
+
 function findLastElement(children: JSXChildPath[], hydratable?: boolean): number {
   let lastElement = -1,
     tagName;
@@ -1383,8 +1428,10 @@ function transformChildren(
     i = 0;
   const filteredChildren = filterChildren(path.get("children")),
     lastElement = findLastElement(filteredChildren, config.hydratable),
+    droppedLineBreak = leadingLineBreakChildren(tagName, filteredChildren),
     childNodes = filteredChildren.reduce(
       (memo: TransformResult[], child: JSXChildPath, index: number) => {
+        if (index < droppedLineBreak) return memo;
         if (child.isJSXFragment()) {
           throw new Error(
             `Fragments can only be used top level in JSX. Not used under a <${tagName}>.`
@@ -1408,10 +1455,12 @@ function transformChildren(
           transformed.loc = sourceLocation(child, child.node);
         const i = memo.length;
         if (transformed.text && i && memo[i - 1].text) {
+          memo[i - 1].templateWithClosingTags =
+            `${memo[i - 1].templateWithClosingTags || (memo[i - 1].template as string)}${
+              transformed.templateWithClosingTags || (transformed.template as string)
+            }`;
           memo[i - 1].template =
             `${memo[i - 1].template as string}${transformed.template as string}`;
-          memo[i - 1].templateWithClosingTags +=
-            transformed.templateWithClosingTags || (transformed.template as string);
         } else memo.push(transformed);
         return memo;
       },
@@ -1424,6 +1473,11 @@ function transformChildren(
   // the marker is truthy — shared or null markers let one slot's cleanup
   // destroy a node that migrated to its neighbor (solidjs/solid#2830).
   const dynamicSlots = childNodes.reduce((n, c) => (c && !c.id && c.exprs.length ? n + 1 : n), 0);
+
+  if (droppedLineBreak) {
+    results.template += "\n";
+    results.templateWithClosingTags += "\n";
+  }
 
   childNodes.forEach((child, index) => {
     if (!child) return;
@@ -1607,19 +1661,29 @@ function nextChild(children: TransformResult[], index: number): babelTypes.Ident
   return children[index + 1] && (children[index + 1].id || nextChild(children, index + 1));
 }
 
+function rendersNothing(child: JSXChildPath): boolean {
+  const node = child.node;
+  if (t.isJSXText(node)) return !trimWhitespace((node.extra?.raw as string | undefined) ?? "");
+  return (
+    t.isJSXExpressionContainer(node) &&
+    getStaticExpression(child as BabelPath<babelTypes.JSXExpressionContainer>) === ""
+  );
+}
+
 // reduce unnecessary refs
 function detectExpressions(
   children: JSXChildPath[],
   index: number,
   config: DOMTransformInfo
 ): boolean | undefined {
-  if (children[index - 1]) {
-    const node = children[index - 1].node;
+  let prev = index - 1;
+  while (prev >= 0 && rendersNothing(children[prev])) prev--;
+  if (children[prev]) {
+    const node = children[prev].node;
     if (
       t.isJSXExpressionContainer(node) &&
       !t.isJSXEmptyExpression(node.expression) &&
-      getStaticExpression(children[index - 1] as BabelPath<babelTypes.JSXExpressionContainer>) ===
-        false
+      getStaticExpression(children[prev] as BabelPath<babelTypes.JSXExpressionContainer>) === false
     )
       return true;
     let tagName;
@@ -1728,11 +1792,13 @@ function processSpreads(
         runningObject = [];
       }
 
-      const s = isDynamic(attribute.get("argument"), {
-        checkMember: true
-      })
-        ? inlineCallExpression(node.argument)
-        : node.argument;
+      const s =
+        !isStatic &&
+        isDynamic(attribute.get("argument"), {
+          checkMember: true
+        })
+          ? inlineCallExpression(node.argument)
+          : node.argument;
 
       spreadArgs.push(isStatic ? t.objectExpression([t.spreadElement(s)]) : s);
     } else if (key && key !== "ref") {

@@ -40,6 +40,8 @@ export {
 export { setConsoleFooter } from "./core/index.js";
 /** @internal Ref callbacks run like a render effect callback at creation (#4761): `@solidjs/web`/`@solidjs/universal` `ref()`. */
 export { runRefCallback } from "./core/index.js";
+/** @internal Dev event handler reads (#1742): compiled dev DOM output reads a handler expression in a strict window that keeps tracking — `@solidjs/web`'s `strictHandler`. Calls `fn` outside dev builds. */
+export { strictReadTracked } from "./core/index.js";
 /** @internal The verdict windows' read (core.ts): non-null while a `latest()` or `isPending()` window is open — solid-js's narrowed accessors (#4648). */
 export { verdict } from "./core/index.js";
 /** @internal The flush round counter (scheduler.ts): hydration's served pass tells its own round from a later one. */
@@ -51,6 +53,8 @@ export { forgetThrownRead } from "./core/dev.js";
 /** @internal The pre-write hook (`setWriteHook` in core/core.ts); the server-components client's deferred hydration. */
 /** @internal Plain-signal identities and the dev read watch (dependency edges; the server-components client). */
 export { setWriteHook, setSignalIdentities, setReadWatch, signalName } from "./core/index.js";
+/** @internal Boundary swaps and off-screen nodes (F-3): `@solidjs/web`'s head registry withdraws the tags of content behind a fallback (#4873). */
+export { setSwapHook, isHidden, heldRead, actionDepth } from "./core/index.js";
 /** @internal Store dependency edges: the name a store proxy's writes go by (the server-components client). */
 export { storeName } from "./store/edges.js";
 import { DEV as _DEV, OBSERVE as _OBSERVE, type Dev, type Observe } from "./core/index.js";

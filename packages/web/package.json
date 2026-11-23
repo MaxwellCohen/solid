@@ -1,7 +1,7 @@
 {
   "name": "@solidjs/web",
   "description": "Solid's web runtime: client rendering, hydration, SSR, and DOM-specific control flow (Portal, Dynamic).",
-  "version": "2.0.0-rc.21",
+  "version": "2.0.3",
   "author": "Ryan Carniato",
   "license": "MIT",
   "homepage": "https://solidjs.com",
@@ -372,20 +372,22 @@
     "coverage": "vitest run --coverage",
     "bench": "vitest bench --run",
     "bench:server": "vitest bench --run --config vite.config.server-bench.mjs",
-    "test-types": "tsc --project tsconfig.test.json && tsc --project tsconfig.test.augment.json"
+    "test-types": "tsc --project tsconfig.test.json && tsc --project tsconfig.test.augment.json && tsc --project tsconfig.test.libcheck.json"
   },
   "dependencies": {
-    "seroval": "1.7.0",
-    "seroval-plugins": "1.7.0"
+    "csstype": "^3.1.0",
+    "seroval": "^1.8.0",
+    "seroval-plugins": "^1.8.0"
   },
   "peerDependencies": {
-    "solid-js": "^2.0.0-rc.21"
+    "solid-js": "^2.0.3"
   },
   "devDependencies": {
     "@codspeed/vitest-plugin": "^5.4.0",
     "@solidjs/signals": "workspace:*",
     "fast-check": "3.23.2",
-    "solid-js": "workspace:*"
+    "solid-js": "workspace:*",
+    "vitest": "^4.1.6"
   },
   "keywords": [
     "solid",

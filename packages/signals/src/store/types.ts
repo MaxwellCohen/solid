@@ -115,9 +115,12 @@ export function isRawValue(value: any): boolean {
   return rawValuesUsed && rawValues.has(value);
 }
 
-/** Mark a value so no store ever wraps it (sticky; it reads as a leaf). */
+/** Keep a value out of store wrapping: every store serves it as is. Pass a
+ * class to keep all instances of it and its subclasses raw. */
 export function markRaw<T>(value: T): T {
-  if (isWrappable(value)) {
+  if (typeof value === "function") {
+    if (value.prototype) wrappableProtos.set(value.prototype, false);
+  } else if (isWrappable(value)) {
     rawValuesUsed = true;
     rawValues.add(value as object);
   }
@@ -152,11 +155,12 @@ export function markRawIngest(container: any): void {
 const OBJECT_PROTO = Object.prototype;
 const wrappableProtos = new WeakMap<object, boolean>();
 
-/** Plain objects and arrays wrap; class instances, DOM nodes, frozen objects
- * and markRaw'd values are leaves. Per-prototype verdict cached. */
+/** Plain objects and arrays wrap, frozen or not (stores never write to their
+ * sources); DOM nodes, platform objects and markRaw'd values are leaves.
+ * Per-prototype verdict cached. */
 export function isWrappable<T>(obj: T | NotWrappable): obj is T;
 export function isWrappable(obj: any) {
-  if (obj == null || typeof obj !== "object" || Object.isFrozen(obj)) return false;
+  if (obj == null || typeof obj !== "object") return false;
   const proto = Object.getPrototypeOf(obj);
   if (proto === OBJECT_PROTO || proto === null) return true;
   if (Array.isArray(obj)) return true;
@@ -164,7 +168,8 @@ export function isWrappable(obj: any) {
   if (wrappable === undefined) {
     wrappable =
       Object.prototype.toString.call(obj) === "[object Object]" &&
-      (typeof Node === "undefined" || !(obj instanceof Node));
+      (typeof Node === "undefined" || !(obj instanceof Node)) &&
+      isWrappable(proto);
     wrappableProtos.set(proto, wrappable);
   }
   return wrappable;

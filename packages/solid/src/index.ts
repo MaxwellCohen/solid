@@ -16,6 +16,7 @@ export {
   isPending,
   isWrappable,
   mapArray,
+  markRaw,
   merge,
   isStatic,
   omit,
@@ -40,6 +41,8 @@ export {
 } from "@solidjs/signals";
 /** @internal — `ref()` in the web and universal runtimes (#4761). */
 export { runRefCallback } from "@solidjs/signals";
+/** @internal — dev event handler reads in compiled DOM output (#1742): `@solidjs/web`'s `strictHandler`. */
+export { strictReadTracked } from "@solidjs/signals";
 /** @internal — the key a root owner carries `render`'s `onError` under, for the web runtime. */
 export { ROOT_ERROR_HOOK } from "@solidjs/signals";
 // `createOwner`: a bare owner, for the runtimes' own scopes (`NoHydration`,
@@ -192,6 +195,8 @@ export function runInServerComponentScope<T>(fn: () => T, _options?: { live?: bo
 export function creationStamp(): number {
   return 0;
 }
+/** @internal Boundary swaps and off-screen nodes (F-3): the head registry withdraws the tags of content behind a fallback (#4873). */
+export { setSwapHook, isHidden, heldRead } from "@solidjs/signals";
 /** @internal A callback run before every signal or store write lands (deferred hydration). */
 export { setWriteHook } from "@solidjs/signals";
 /** @internal Dependency edges: name plain signals so a write reports which one; dev read watch. */

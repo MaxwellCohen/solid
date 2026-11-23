@@ -9,6 +9,7 @@ import {
 } from "./constants.js";
 import {
   createRoot as root,
+  createOwner,
   getOwner,
   onCleanup,
   runWithOwner,
@@ -43,6 +44,8 @@ import {
   hasServerTiming,
   mergeServerTiming,
   traceMetaMarkup,
+  withholdForSharedCache,
+  sharedCacheMayStore,
   type TraceContext
 } from "./trace.js";
 import { observeRender, timesServerWork } from "./server-observe.js";
@@ -1626,6 +1629,8 @@ interface TagInfo {
   raw: boolean;
   formDefaults: Record<string, string> | undefined;
   formAttributes: Record<string, string> | undefined;
+  /** 1 for <select>, 2 for <option>: the select-value match (`ssrSelect`). */
+  sel: number;
 }
 // What ends a tag or attribute name in the HTML tokenizer (whitespace, `/`,
 // `>`, `=`), what it reports as an error inside one (quotes, `<`, NUL), and
@@ -1659,7 +1664,8 @@ function tagInfo(tag: string): TagInfo {
       textarea: tag === "textarea",
       raw: tag === "script" || tag === "style",
       formDefaults,
-      formAttributes
+      formAttributes,
+      sel: tag === "select" ? 1 : tag === "option" ? 2 : 0
     };
     if (tagInfos.size < 512) tagInfos.set(tag, info);
   }
@@ -1926,6 +1932,7 @@ export function renderToString(code, options = {}) {
     serializeFragmentAssets("", tracking.boundaryModules, sharedConfig.context, renderId);
     closed = true;
     serializer.close();
+    withholdForSharedCache(context.trace, requestEvent);
     const head = renderShellHead(
       headRegistry,
       nonce,
@@ -1935,7 +1942,7 @@ export function renderToString(code, options = {}) {
     );
     const document = withShellEnd(
       assembleDocument(
-        resolveSSRSelectValues(html),
+        html,
         tracking.emittedAssets,
         tracking.preloadLinks,
         tracking.inlineStyles,
@@ -3424,23 +3431,19 @@ export function renderToStream(code, options = {}) {
               // the blank: an empty template, so what its swap lists is the
               // outcome alone (the client reads a listed outcome as the
               // server's answer for the failure, #4287).
-              sink.fragment(
-                key,
-                resolveSSRSelectValues(value !== undefined ? value : error ? "" : " "),
-                {
-                  styles,
-                  revealGroup,
-                  error: error
-                    ? ssrSanitizeError(error, null, undefined, undefined, errorScope)
-                    : error,
-                  // A sink that holds the fragment back (a `templateFor`
-                  // patch waiting on its reveal group, or on the content it
-                  // is nested in) settles it when the template goes out, so
-                  // the client never reads a settled fragment whose template
-                  // is not in the document.
-                  settle: () => item.resolve(error)
-                }
-              ) !== true
+              sink.fragment(key, value !== undefined ? value : error ? "" : " ", {
+                styles,
+                revealGroup,
+                error: error
+                  ? ssrSanitizeError(error, null, undefined, undefined, errorScope)
+                  : error,
+                // A sink that holds the fragment back (a `templateFor`
+                // patch waiting on its reveal group, or on the content it
+                // is nested in) settles it when the template goes out, so
+                // the client never reads a settled fragment whose template
+                // is not in the document.
+                settle: () => item.resolve(error)
+              }) !== true
                 ? item.resolve(error)
                 : // The completion check still runs: a fragment whose group
                   // never releases it goes out at the end (releaseUnwritten).
@@ -3649,6 +3652,7 @@ export function renderToStream(code, options = {}) {
     flushStubBatch();
     // Shell head flush: commits every registration not owned by a
     // still-pending fragment (those flush with their fragment later).
+    withholdForSharedCache(context.trace, requestEvent);
     const head = renderShellHead(
       headRegistry,
       nonce,
@@ -3666,7 +3670,7 @@ export function renderToStream(code, options = {}) {
     // AND arrives separately through `sink.asset`. Consume them inside this
     // call (the document sink splices the head synchronously) — a sink that
     // stores the meta and re-reads it later sees late entries twice.
-    sink.shell(resolveSSRSelectValues(html), {
+    sink.shell(html, {
       preloads: tracking.emittedAssets,
       preloadLinks: tracking.preloadLinks,
       inlineStyles: tracking.inlineStyles,
@@ -5531,7 +5535,7 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
     let i = 0;
     for (; i < props.length; i++) {
       const s = props[i];
-      if (s == null || typeof s === "function" || $PROXY in s) break;
+      if (!s || typeof s === "function" || $PROXY in s) break;
     }
     if (i === props.length) sources = props;
     else {
@@ -5539,8 +5543,9 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
       owners = [];
       collectSpreadSources(props, viewKeys, owners);
     }
-  } else if (props == null) {
-    // A nullish source (static or resolved) is an empty spread (#3297).
+  } else if (!props) {
+    // A nullish or falsy source (static or resolved) is an empty spread
+    // (#3297; `{...(c() && x)}`, #4937).
     props = {};
   } else if ($PROXY in props) {
     if (viewOf(props) !== undefined) {
@@ -5551,6 +5556,10 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
   }
   const info = tagInfo(tag);
   const skipChildren = info.isVoid;
+  // A spread <select>'s `value` and a spread <option>'s match (`ssrSelect`,
+  // `ssrOption`): the select's state, the option's value and whether it
+  // carries `selected` itself.
+  let sel, optValue, optOwn;
   // Each emitted attribute carries its own leading space (the hydration key
   // already does), so skipped props leave no stray whitespace behind:
   // `<li _hk=0>` rather than `<li _hk=0 >` (#3382).
@@ -5612,6 +5621,11 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
       // element with a spread is serialized here instead. Keep the runtime
       // path equivalent: textarea value/defaultValue are its text content,
       // never HTML attributes (#3286).
+      if (info.sel === 1 && prop === "value") {
+        const value = props[prop];
+        sel = ssrSelect(value);
+        continue;
+      }
       if (info.textarea && (prop === "value" || prop === "defaultValue")) {
         const value = props[prop];
         if (value !== null) children = escape(value);
@@ -5637,6 +5651,10 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
       if (value == undefined || prop.startsWith("prop:") || prop === "ref" || isEventName(prop))
         continue;
       if (link !== null && LinkAttributes.has(prop)) link[prop] = value;
+      if (info.sel === 2) {
+        if (prop === "value") optValue = value;
+        else if (prop === "selected" && value) optOwn = true;
+      }
       if (prop === "style") {
         result += ` style="${ssrStyle(value)}"`;
       } else if (prop === "class") {
@@ -5676,8 +5694,16 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
   // The hydration key is unquoted, so a void element needs the space before
   // `/>` or the slash becomes part of the key's value.
   if (skipChildren) return { t: result + " />", $: SSR_NODE };
-  if (childOwner !== null) children = info.raw ? childOwner.children : escape(childOwner.children);
-  if (typeof children === "function") children = children();
+  if (sel !== undefined) children = ssrIn(sel, () => spreadChildren(info, childOwner, children));
+  else children = spreadChildren(info, childOwner, children);
+  if (info.sel === 2)
+    result += ssrOption(
+      optValue !== undefined || typeof children !== "string"
+        ? optValue
+        : children.replace(/&lt;/g, "<").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim(),
+      undefined,
+      optOwn
+    );
   // `() => scope(fn)` children return the scope's evaluator: run it as resolveSSRNode would.
   let thunk = null;
   if (typeof children === "function" && (ctx === undefined || !ctx.liveHoles)) {
@@ -5720,6 +5746,12 @@ export function ssrElement(tag, props, children, needsId, skip, attrs) {
   return ssr([result + ">", info.close], res);
 }
 
+// A spread element's children, read after every attribute (see the walk).
+function spreadChildren(info, childOwner, children) {
+  if (childOwner !== null) children = info.raw ? childOwner.children : escape(childOwner.children);
+  return typeof children === "function" ? children() : children;
+}
+
 /**
  * `ssrElement`'s collecting pass for sources that are not all plain
  * literals: a function source is a plain thunk, called once (see the walk;
@@ -5731,7 +5763,7 @@ function collectSpreadSources(props, viewKeys, owners) {
   for (let i = 0; i < props.length; i++) {
     let s = props[i];
     if (typeof s === "function") s = s();
-    if (s != null) sourceOwners(s, viewKeys, owners);
+    if (s) sourceOwners(s, viewKeys, owners);
   }
 }
 
@@ -5857,189 +5889,74 @@ export function ssrLinkClaim(attrs) {
   return ctx.linkClaim(attrs);
 }
 
-// --- <select value> resolution (solidjs/solid#3013) ---------------------------
+// --- <select value> at render time (solidjs/solid#3013, #4891) --------------
 //
 // HTML defines no `value` attribute for <select>: a browser's initial
-// selection comes from `selected` on an <option>. The compiler (and the
-// runtime spread path) emit the bound value as a `value` attribute in the
-// markup; this flush-time pass resolves it into `selected` on the matching
-// option(s) and strips the attribute — React SSR parity — so no-JS clients
-// and crawlers see the right selection. Hydration still assigns the `value`
-// property, so JS clients were already correct.
-//
-// String-scan safety: this only ever runs on our own serializer output.
-// `escape(s, true)` guarantees `"` cannot appear inside an attribute value,
-// so a quote-aware tag walk (skip "…" runs, then `>` really ends the tag)
-// is exact — `<` / `>` ARE legal inside attribute values and a naive
-// indexOf would mis-scan on them. Text content has `<` escaped, so between
-// tags only comments (hydration markers) start with `<`. One deliberate
-// blind spot: `multiple` as a word inside a quoted attribute value reads as
-// the multiple attribute, which only matters when the bound value contains
-// a comma. A select split across flush chunks (a Loading boundary inside
-// it) is left untouched: its options stream later as a fragment template
-// and hydration assigns the property.
+// selection comes from `selected` on an <option> (React SSR parity, so
+// no-JS clients and crawlers see the right selection; hydration still
+// assigns the `value` property). The compilers turn a bound `<select
+// value={v}>` into `ssrSelect(v)` ahead of its children, which reads
+// the value once and keeps it on a transparent owner (no hydration id of its
+// own): the select's dynamic children render under it (`ssrIn`), so an
+// option a component, a `<For>` or a later async render produces finds it
+// through its owner's context. Each compiled server <option> asks
+// `ssrOption`, which writes ` selected` when its value matches — handed the
+// select's state when the option sits in the select's own template, else
+// read off the current owner. An option carrying `selected` itself is the
+// select's default (the forms contract: the default is the SSR state, the
+// bound value applies at hydration), and options after it are left alone.
+// Nothing is scanned afterwards, so a page with no option pays nothing, and
+// the state lives on the render's owner tree, never in module scope.
 
-// Decodes the entities our own escape() produces (attr and content forms).
-function decodeSSREntities(s) {
-  return s.indexOf("&") < 0
-    ? s
-    : s
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, "<")
-        .replace(/&amp;/g, "&");
+// The bound select's state, keyed on its owner's context map.
+const SELECT = Symbol();
+
+/** Compiler-emitted primitive; not for hand-written code. @internal */
+export function ssrSelect(value: any): any;
+
+export function ssrSelect(value) {
+  const owner = createOwner({ transparent: true });
+  const state = { v: value, d: false, o: owner };
+  owner._context = { ...owner._context, [SELECT]: state };
+  return state;
 }
 
-// Matches the quoted form (`value="…"`) AND the bare form (`value` followed
-// by a space, `>`, or end-of-attrs): empty attribute values serialize as
-// bare attributes (see ssrSpread / compiled templates), and an empty-string
-// bound value is a real bound value — a `value=""` option must match it
-// (#3013 follow-up). Group 1 is undefined for the bare form → empty string.
-const SELECT_VALUE_ATTR = /\svalue(?:="([^"]*)")?(?=[\s>]|$)/;
+/** Compiler-emitted primitive; not for hand-written code. @internal */
+export function ssrIn<T>(state: any, fn: () => T): T;
 
-// True end (`>`) of the tag opening at `i`, skipping quoted attribute
-// values. -1 when the tag never closes in this string.
-function tagEnd(html, i) {
-  for (let j = i + 1; j < html.length; j++) {
-    const c = html.charCodeAt(j);
-    if (c === 34) {
-      j = html.indexOf('"', j + 1);
-      if (j < 0) return -1;
-    } else if (c === 62) return j;
+export function ssrIn(state, fn) {
+  const r = runWithOwner(state.o, fn);
+  if (typeof r !== "function") return r;
+  const w = Object.assign(() => ssrIn(state, r), r);
+  if (r.$fn) {
+    const inner = r.$fn;
+    w.$fn = Object.defineProperty(() => ssrIn(state, inner), "name", { value: inner.name });
   }
-  return -1;
+  return w;
 }
 
-// Text content of an option starting at `from`, collecting across comment
-// nodes (hydration markers around dynamic text) until a real tag starts.
-function optionText(html, from) {
-  let t = "";
-  let i = from;
-  for (;;) {
-    const lt = html.indexOf("<", i);
-    if (lt < 0) return t + html.slice(i);
-    t += html.slice(i, lt);
-    if (!html.startsWith("<!--", lt)) return t;
-    const ce = html.indexOf("-->", lt);
-    if (ce < 0) return t;
-    i = ce + 3;
+/** Compiler-emitted primitive; not for hand-written code. @internal */
+export function ssrOption(value: any, state?: any, own?: any): string;
+
+export function ssrOption(value, state, own) {
+  if (state === undefined) {
+    const o = getOwner();
+    if (!o || !(state = o._context[SELECT])) return "";
   }
+  if (own) return ((state.d = true), "");
+  if (state.d) return "";
+  // A text-content option's value comes as a thunk of its one child.
+  if (typeof value === "function") value = value();
+  if (value == null) return "";
+  value = String(value);
+  const v = state.v;
+  // As the client assigns it (client.ts `applySelectValue`): an array
+  // selects every option whose value matches an entry, anything else one.
+  return v != null && (v.map ? v.some(x => x != null && String(x) === value) : String(v) === value)
+    ? " selected"
+    : "";
 }
 
-// Whether the tag at `i` is `<name` at a proper name boundary.
-function tagIs(html, i, name) {
-  if (!html.startsWith(name, i + 1)) return false;
-  const c = html.charCodeAt(i + 1 + name.length);
-  return c === 32 || c === 62 || c === 9 || c === 10 || c === 13;
-}
-
-// Compiler-armed gate (stage-4 SSR): compiled output containing a
-// `<select value=…>` (or a spread on a select) emits `_$ssrSelectValues()`
-// once per module. Apps that never bind a select value never even SCAN —
-// profiling showed the gate's own indexOf costing >50% of a select-free
-// page's render, because the first pass over the freshly-assembled rope
-// pays its flattening. Raw HTML injected around the compiler (innerHTML
-// escape hatches) intentionally gets browser semantics — the select-value
-// forms contract is a JSX-level promise.
-let selectValuesActive = false;
-export function ssrSelectValues() {
-  selectValuesActive = true;
-}
-
-export function resolveSSRSelectValues(html) {
-  // Region-jumping walk: attribute values escape `<` (ESCAPE_ATTR), so
-  // every "<select" hit below is a genuine tag position — jump candidate to
-  // candidate and walk tags ONLY inside value-carrying select regions;
-  // everything between regions is copied verbatim. (The old form walked
-  // EVERY tag in the document once any <select> existed — O(document) per
-  // render and per streamed fragment.)
-  if (!selectValuesActive) return html;
-  let cand = html.indexOf("<select");
-  if (cand < 0) return html;
-  let out = "";
-  let idx = 0; // emitted through idx
-  while (cand >= 0) {
-    // Word boundary — skips <selectedcontent> hits.
-    if (!tagIs(html, cand, "select")) {
-      cand = html.indexOf("<select", cand + 7);
-      continue;
-    }
-    const e0 = tagEnd(html, cand);
-    if (e0 < 0) break;
-    const open = html.slice(cand, e0 + 1);
-    const m = SELECT_VALUE_ATTR.exec(open);
-    if (!m) {
-      // No bound value: nothing to resolve in this select.
-      cand = html.indexOf("<select", e0 + 1);
-      continue;
-    }
-    const bound = decodeSSREntities(m[1] ?? "");
-    const sel = {
-      values: /\smultiple(?=[\s>=])/.test(open) ? bound.split(",") : [bound],
-      strip: cand + m.index,
-      stripEnd: cand + m.index + m[0].length,
-      body: e0 + 1,
-      marks: [],
-      defaulted: false
-    };
-    // Tag walk scoped to the region: options and comments until the close.
-    let committed = false;
-    let i = html.indexOf("<", e0 + 1);
-    while (i >= 0) {
-      let e;
-      if (html.charCodeAt(i + 1) === 33) {
-        // Comment (hydration marker) or bare <!> placeholder.
-        e = html.charCodeAt(i + 2) === 45 ? html.indexOf("-->", i) : html.indexOf(">", i);
-        if (e < 0) break;
-        if (html.charCodeAt(i + 2) === 45) e += 2;
-      } else {
-        e = tagEnd(html, i);
-        if (e < 0) break;
-        // "</select>" exactly: <selectedcontent>'s close also starts "</select".
-        if (html.startsWith("</select>", i)) {
-          // Commit: drop the value attribute, then mark the matched options —
-          // unless an option carried `selected` already (a defaultSelected):
-          // per the forms contract the DEFAULT is the SSR state and the bound
-          // value applies at hydration, exactly like defaultValue + value on
-          // an <input>.
-          out += html.slice(idx, sel.strip) + html.slice(sel.stripEnd, sel.body);
-          let seg = sel.body;
-          if (!sel.defaulted) {
-            for (let k = 0; k < sel.marks.length; k++) {
-              out += html.slice(seg, sel.marks[k]) + " selected";
-              seg = sel.marks[k];
-            }
-          }
-          out += html.slice(seg, i);
-          idx = i;
-          committed = true;
-          break;
-        } else if (tagIs(html, i, "option")) {
-          const attrs = html.slice(i + 7, e);
-          if (/\sselected(?=[\s=]|$)/.test(attrs)) sel.defaulted = true;
-          else {
-            const vm = SELECT_VALUE_ATTR.exec(attrs);
-            // Spec: no value attribute → text content, whitespace collapsed.
-            // A bare `value` attribute (vm[1] undefined) IS a value: "".
-            const value = vm
-              ? decodeSSREntities(vm[1] ?? "")
-              : decodeSSREntities(optionText(html, e + 1))
-                  .replace(/\s+/g, " ")
-                  .trim();
-            if (sel.values.includes(value)) sel.marks.push(e);
-          }
-        }
-      }
-      i = html.indexOf("<", e + 1);
-    }
-    // A select that never closes in this chunk (a Loading boundary inside
-    // it) never commits and stays byte-identical — matching the old walk,
-    // which also never processed anything past an uncommitted select.
-    if (!committed) break;
-    cand = html.indexOf("<select", idx);
-  }
-  if (idx === 0) return html;
-  return out + html.slice(idx);
-}
 export function escape(s: any, attr?: boolean): any;
 
 export function escape(s, attr) {
@@ -6121,7 +6038,7 @@ const ESCAPE_CONTENT = /[&<]/;
 // `<` escapes in attribute values too (stage-4 SSR): it costs nothing on
 // the fast path (same single regex scan) and guarantees that a raw
 // "<select" byte sequence in the document is ALWAYS a genuine tag start —
-// the invariant resolveSSRSelectValues' region-jumping depends on. Also
+// the invariant the old select-value scan's region-jumping depended on. Also
 // matches React/octane escaping norms.
 const ESCAPE_ATTR = /[&"<]/;
 
@@ -6263,7 +6180,7 @@ function hydrationBootstrap(eventNames = ["click", "input"], nonce, ledger) {
     nonce ? ` nonce="${escape(String(nonce), true)}"` : ""
   }>window._$HY||(e=>{let t=e=>e&&e.hasAttribute&&(e.hasAttribute("_hk")?e:t(e.host&&e.host.nodeType?e.host:e.parentNode));["${eventNames.join(
     '","'
-  )}"].forEach((o=>document.addEventListener(o,(o=>{if(!e.events)return;let s=t(o.composedPath&&o.composedPath()[0]||o.target);s&&!e.completed.has(s)&&e.events.push([s,o])}))))})(_$HY={events:[],completed:new WeakSet,r:new Proxy({},{set:(r,k,v)=>(v instanceof Promise&&v.catch(()=>{}),r[k]=v,!0)}),${ledger ? "s:{}," : ""}fe(){}});</script><!--xs-->`;
+  )}"].forEach((o=>document.addEventListener(o,(o=>{if(!e.events)return;let n=o.composedPath&&o.composedPath()[0]||o.target,s=t(n);s&&!e.completed.has(s)&&e.events.push([s,o,n])}))))})(_$HY={events:[],completed:new WeakSet,r:new Proxy({},{set:(r,k,v)=>(v instanceof Promise&&v.catch(()=>{}),r[k]=v,!0)}),${ledger ? "s:{}," : ""}fe(){}});</script><!--xs-->`;
 }
 
 function queue(fn) {
@@ -7509,6 +7426,19 @@ export function commitEventResponse(response: Response, event?: RequestEvent): R
  */
 export function commitEventResponse(response, event = getRequestEvent()) {
   const stub = event && event.response;
+  // #5050 (#4938, #3985 for a handler's own Response): an answer a shared
+  // cache may store tells no viewer the request's trace. The headers it
+  // leaves with decide: the response's own, then the stub's, which only
+  // fill gaps. Only a GET or HEAD answer is stored (the server-function
+  // road's rule); a POST's trace rides as before.
+  // A committed stub's head already left with whatever it said.
+  const method = event && event.request && event.request.method;
+  if ((method === "GET" || method === "HEAD") && !(stub && stub.committed)) {
+    const leaving = name =>
+      response.headers.get(name) ?? (stub && stub.headers ? stub.headers.get(name) : null);
+    if (sharedCacheMayStore(leaving("Cache-Control"), leaving("CDN-Cache-Control")))
+      traceForEvent(event!).emit = false;
+  }
   if (!stub || !stub.headers || stub.committed) {
     // No head to fold. The trace is the REQUEST's, not the stub's: an event
     // without a `response` (the server-function handler's default event, a
@@ -7796,7 +7726,20 @@ export function registerElementClaim(
 export function registerElementClaim() {
   return noopCleanup;
 }
-function noopCleanup() {} /** Server no-op: returns `node` unchanged. Claims never fire during SSR. */
+function noopCleanup() {}
+// Trusted Types are a DOM concern: on the server a policy has nothing to
+// create, and an isomorphic entry that sets one must not throw.
+export function setTrustedTypesPolicy(
+  policy: { createHTML(html: string): unknown } | undefined
+): void;
+
+export function setTrustedTypesPolicy() {}
+/** Server: markup stays a string. @internal */
+export function trustedHTML(html: string): string;
+
+export function trustedHTML(html) {
+  return html;
+} /** Server no-op: returns `node` unchanged. Claims never fire during SSR. */
 export function claimElement<T extends Element>(node: T, owner?: Owner | null): T;
 
 export function claimElement(node) {
@@ -7835,6 +7778,8 @@ export {
   notSup as template,
   notSup as setProperty,
   notSup as setStatefulProperty,
+  notSup as heldRead,
+  notSup as strictHandler,
   notSup as className,
   notSup as assign,
   notSup as hydrate,

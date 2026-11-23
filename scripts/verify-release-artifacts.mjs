@@ -1,27 +1,16 @@
-// Dry-run-publishes every fixed-group package and asserts the tarball would
+// Dry-run-publishes every release package and asserts the tarball would
 // contain the manifest's entry points (main/module/types/browser/bin/exports).
 // Catches broken `files` globs, missing dist output, and manifest mistakes
-// BEFORE release.mjs publishes anything. Requires a completed build
+// BEFORE release.mjs publishes anything. A package whose version is already
+// on npm is skipped, as release.mjs skips it: npm refuses even a dry run
+// over a published version. Requires a completed build
 // (`pnpm run build && pnpm run types`); runs npm with --ignore-scripts so
 // prepublish hooks do not re-build.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { packageIsPublished, releasePackages } from "./release-packages.mjs";
 
-const changesetConfig = JSON.parse(fs.readFileSync(".changeset/config.json", "utf8"));
-const releaseNames = new Set(changesetConfig.fixed.flat());
-
-const directories = new Map();
-for (const entry of fs.readdirSync("packages", { withFileTypes: true })) {
-  if (!entry.isDirectory()) continue;
-  const manifest = `packages/${entry.name}/package.json`;
-  if (!fs.existsSync(manifest)) continue;
-  const pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
-  if (releaseNames.has(pkg.name)) directories.set(pkg.name, { directory: `packages/${entry.name}`, pkg });
-}
-
-for (const name of releaseNames) {
-  if (!directories.has(name)) throw new Error(`Fixed package ${name} was not found in packages/.`);
-}
+const directories = releasePackages();
 
 // Collect the relative file paths the manifest points consumers at. Wildcard
 // exports and non-string leaves are skipped — only concrete paths are checked.
@@ -48,6 +37,10 @@ function collectEntryFiles(pkg) {
 const failures = [];
 
 for (const [name, { directory, pkg }] of directories) {
+  if (packageIsPublished(name, pkg.version)) {
+    console.log(`${name}@${pkg.version} is already published; skipping.`);
+    continue;
+  }
   let report;
   try {
     const stdout = execFileSync(

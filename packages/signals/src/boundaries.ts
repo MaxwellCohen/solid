@@ -1,5 +1,4 @@
-/**
- * Boundaries — the display consumers between a frame reader and the root:
+/** Boundaries — the display consumers between a frame reader and the root:
  * `createLoadingBoundary` (`<Loading>`) and `createErrorBoundary`
  * (`<Errored>`).
  *
@@ -10,35 +9,21 @@
  * status reaching it from its content re-derives it instead of marking it,
  * and its pass decides.
  *
- * Status protocol (B5). A frame reader under a boundary that goes pending or
- * errors tells `GlobalQueue.notify`, which asks `catchStatus` before the
- * root: the nearest boundary of that status that is collecting — an error
- * boundary always; a loading boundary that has not shown content yet, or
- * whose `on` just changed — records the reader and shows its fallback, and
- * the root never hears of it (no transaction is opened: A33, a fallback-
- * caught flight holds nothing). A loading boundary showing content forwards:
- * the root holds the frame as for any reader. The tree's own status takes
- * the same route from the output's pass (`read(tree)` throws it).
+ * Status: `GlobalQueue.notify` asks `catchStatus` before the root. The
+ * nearest collecting boundary of that status records the reader and shows
+ * its fallback, and the root never hears of it: a fallback-caught flight
+ * holds nothing (F-3, F-5). A loading boundary showing content forwards.
  *
- * The hold (`blocked`, scheduler.ts) asks `hiddenBy`: a reader behind a
- * fallback — any boundary on its chain whose last pass chose the fallback —
- * is not on screen and holds nothing. An error boundary flipping to its
- * fallback is the same as a loading one resetting: every reader under it
- * stops counting, and a flight whose only visible reader that was loses its
- * hold (maintainer, 2026-10-01).
+ * The hold asks `hiddenBy`: a reader behind any fallback is not on screen
+ * and holds nothing (F-3).
  *
- * Reveal. The seam (`boundarySeam`) drops readers that settled, died, or
- * landed and committed; a fallback with none left re-derives its output,
- * which reads the tree again. A reader that landed but is held (CONFIG_HELD,
- * its value staged in a transaction) is not settled: the content reveals at
- * the commit, with the rest of the frame (#3540).
+ * Reveal: the seam (`boundarySeam`) drops readers that settled, died, or
+ * landed and committed; a fallback with none left re-derives its output. A
+ * held reader is not settled: the content reveals at the commit (#3540).
  *
- * `on` (loading only): a tracked function whose reads re-arm the boundary.
- * A pass of it after the mount arms the boundary for the flush: anything
- * pending under it — already (its forwarded readers), or going pending later
- * in the same heap — is collected and the fallback shows now, with the
- * change's frame; nothing pending, and the arm is a no-op at the seam.
- */
+ * `on` (loading only): a pass of it after the mount arms the boundary for
+ * the flush; anything pending under it is collected and the fallback shows
+ * with the change's frame (D-17). */
 import {
   CAUGHT_REARMED,
   CONFIG_REDERIVE,
@@ -59,10 +44,19 @@ import {
   STATUS_PENDING,
   STATUS_UNINITIALIZED
 } from "./core/constants.js";
-import { computed, read, recompute, runWithOwner, setSignal, signal } from "./core/core.js";
+import {
+  computed,
+  read,
+  recompute,
+  runWithOwner,
+  setSignal,
+  signal,
+  untrack
+} from "./core/core.js";
 import { emitDiagnostic, forgetThrownRead, reportDiagnostic } from "./core/dev.js";
 import { shadowSeatRestore, shadowSeatSave, shadowSwapSeat } from "./core/seat.js";
 import { NotReadyError, unwrapStatusError } from "./core/error.js";
+import { isThenable } from "./core/async.js";
 import { reportClientError } from "./core/error-hooks.js";
 import { link } from "./core/graph.js";
 import { enqueueSub } from "./core/heap.js";
@@ -77,15 +71,14 @@ import {
   heldUnder,
   joinFuture,
   passLane,
-  passTx,
-  resolveTx,
   schedule,
   setPassLane,
   txOf,
   unhold,
   type Transaction,
   installBoundaryHooks,
-  laneStageHook
+  laneStageHook,
+  swapHook
 } from "./core/scheduler.js";
 import { attrHooks } from "./core/attribution-hooks.js";
 import type { Computed, Owner, Signal } from "./core/types.js";
@@ -179,10 +172,28 @@ const behindError = (b: Boundary | null): boolean =>
 /** Catches what reaches it: an error boundary always; a loading one until it
  * has shown content, or while re-armed. Behind an error fallback nothing is
  * on screen, so the error boundary's recovery re-arms the subtree: a loading
- * boundary there has not shown content (D-39, F-4, #4627) — a query; the
+ * boundary there has not shown content (D-41, F-4, #4627) — a query; the
  * boundary is fresh again once it catches (`caught`). */
 const isCollecting = (b: Boundary): boolean =>
   b._type === STATUS_ERROR || !b._initialized || b._armed || behindError(b._parent);
+
+/** The nearest loading boundary at or above `b` catches what is pending
+ * (#4926). */
+const freshAbove = (b: Boundary | null): boolean =>
+  !!b && (b._type & STATUS_PENDING ? isCollecting(b) : freshAbove(b._parent));
+
+/** The statuses that keep reader `r` of `b`: `b`'s own and pending — and,
+ * for a loading boundary behind an error fallback, the error of a reader
+ * directly under it (an error boundary between them shows that error
+ * itself; a held signal it waits on has no context): there is nothing to
+ * reveal, the error shows above. Revealing re-derived the content, whose
+ * re-read retried the error's source: pending again, caught again, without
+ * end (#4870). The error's recovery answers the reader, which reveals it
+ * with the recovered content. */
+const keeps = (b: Boundary, r: Computed<any>): number =>
+  b._type |
+  STATUS_PENDING |
+  (behindError(b._parent) && r._context?.[BOUNDARY] === b ? STATUS_ERROR : 0);
 
 /** A reader `b` waits on: recorded for its `on`, and `b` visited at the seam. */
 function record(b: Boundary, node: Computed<any>, source = node): void {
@@ -193,7 +204,7 @@ function record(b: Boundary, node: Computed<any>, source = node): void {
 /** The reader goes to the fallback: recorded, and the output re-derives
  * (a no-op while the output's own pass is running — its post-check
  * decides). */
-function caught(b: Boundary, node: Computed<any>, error: unknown, source = node): void {
+function caught(b: Boundary, node: Computed<any>, error?: unknown, source = node): void {
   if (b._type === STATUS_ERROR) {
     // The error's source is the retry target, but the reader's selected
     // outcome owns publication. Do not lose a latest/optimistic lane when
@@ -223,12 +234,12 @@ function caught(b: Boundary, node: Computed<any>, error: unknown, source = node)
   }
   // A loading boundary that catches has not shown content: fresh until it
   // does — already so unless it caught behind an error fallback, which the
-  // recovery leaves catching (D-39, #4627); a re-arm's `flip` says it too.
+  // recovery leaves catching (D-41, #4627); a re-arm's `flip` says it too.
   else b._initialized = false;
   record(b, node, source);
   // A loading boundary behind an error fallback that catches a pending
   // holds nothing above it: the error boundary's recovery shows its
-  // fallback beside the recovered content (D-39, #4627).
+  // fallback beside the recovered content (D-41, #4627).
   if (b._armed) flip(b);
   // Already showing the fallback: one more reader to wait on changes
   // nothing on screen. The fallback is instantiated once per show — a later
@@ -285,7 +296,7 @@ function catchStatus(
     if (collecting.size)
       for (let b: Boundary | null | undefined = boundaryOf(node); b; b = b._parent)
         if (
-          !((b._readers.get(node)?._statusFlags as number) & (b._type | STATUS_PENDING)) &&
+          !((b._readers.get(node)?._statusFlags as number) & keeps(b, node)) &&
           b._readers.delete(node) &&
           !prune(b, 0)
         ) {
@@ -296,9 +307,9 @@ function catchStatus(
   }
   for (let b: Boundary | null | undefined = boundaryOf(node); b; b = b._parent) {
     if (!(b._type & flags)) {
-      // A pending passing an error fallback by (A6) is still a reader the
-      // content needs: the error stays the display until it answers too —
-      // revealed beside its stale value, the frame tears (D-39, F-1, #4592).
+      // A pending passing an error fallback by (D-38) is still a reader the
+      // content needs: revealed beside its stale value, the frame tears (D-41,
+      // F-1, #4592).
       if (b._fallback && b._type > flags) record(b, node);
       continue;
     }
@@ -323,18 +334,10 @@ function armedOver(node: Computed<any>): boolean | undefined {
 function hiddenBy(r: Computed<any>, seen?: Set<Computed<any>>): Boundary | undefined {
   for (let b: Boundary | null | undefined = boundaryOf(r); b; b = b._parent)
     if (b._fallback) return b;
-  // A boundary output passing a pending by (CONFIG_REDERIVE: an error
-  // boundary, A6) is transparent: on screen only through the render effects
-  // it reaches — through a memo or another error boundary, wherever they
-  // were created (Reader, F-3). Reaching none, or only effects behind
-  // fallbacks — an error boundary built outside the `<Loading>` whose
-  // content reads it — it holds nothing (F-4, D-14, #4638). Reaching none,
-  // `h` is `1`: hidden with no boundary to name, only ever for a non-effect
-  // (`heldRun` asks about effects). Inside the walk a user effect reached
-  // through the output reads nothing on screen (Reader: never a reader), and
-  // a node already walked is not walked again (`seen`: had it reached a
-  // shown effect the walk would have stopped), so a memo lattice below the
-  // output costs its size, not its paths.
+  // An error boundary output passing a pending by (D-38) is on screen only
+  // through the render effects it reaches (F-3). Reaching none, or only
+  // effects behind fallbacks, it holds nothing (F-4, D-12, #4638); `h` is `1`
+  // then. Each node is walked once (`seen`), so a memo lattice costs its size.
   let h: any,
     s = r._subs;
   if (seen || r._config & CONFIG_REDERIVE)
@@ -346,20 +349,24 @@ function hiddenBy(r: Computed<any>, seen?: Set<Computed<any>>): Boundary | undef
   return h;
 }
 
-/** `heldRunHook` (scheduler.ts): a queued run behind a fallback waits for the reveal
- * (maintainer, 2026-10-02: the queue is held, the synchronous first render
- * goes through). A user effect's, which would read a DOM that is not
- * attached ("many depend on reading the DOM, something that can't happen
- * off screen"); a render effect's update too — a Portal or a head-tag
- * library writes outside the hidden subtree, and a queued render run is
- * what mounts them. A user effect's first run is scheduled like every other,
- * so a mount under a fallback defers it too; a render effect's first run is
- * synchronous on creation and never comes here. The run's `_modified` stays
- * set; the reveal re-queues it by type (`release`), and a boundary above
- * still showing its fallback holds it again then. */
+/** `heldRunHook` (scheduler.ts): a queued run behind a fallback waits for the
+ * reveal (F-3). A user effect would read a DOM that is not attached; a
+ * render update mounts Portals and head tags outside the hidden subtree. A
+ * render effect's first run is synchronous on creation and never comes
+ * here. The reveal re-queues the run by type (`release`). */
 function heldRun(node: Computed<any>): boolean {
   const b = hiddenBy(node);
-  if (b === undefined) return false;
+  // A swap to the fallback still staged in a hold (an `on` re-arm the
+  // frame holds) has not reached the screen: the content is still the
+  // display, and a run there — a guess written over it — applies now
+  // (D-17, F-1, #4987).
+  // So is one whose content a guess lane carries beside it (#4999; lanes
+  // only, `laneStageHook`).
+  if (
+    b === undefined ||
+    b._output!._config & (laneStageHook ? CONFIG_HELD | CONFIG_OVERRIDE : CONFIG_HELD)
+  )
+    return false;
   (b._runs ??= new Set()).add(node);
   return true;
 }
@@ -384,7 +391,7 @@ function release(b: Boundary): void {
 /** `r`, held by error boundary `b` for the error `s` threw, is pending
  * again after `s` answered, and a loading boundary between them that has
  * not shown content catches it: that boundary is its display, beside the
- * recovered content (D-39, F-4, #4627). Not while that boundary's swap to
+ * recovered content (D-41, F-4, #4627). Not while that boundary's swap to
  * its fallback is staged in a hold (a recovery written in an action's tick):
  * the error stays up until the hold reveals both (D-41, F-1). */
 function caughtBelow(b: Boundary, r: Computed<any>, s: Computed<any>): boolean {
@@ -406,41 +413,25 @@ function reads(n: Computed<any>, s: Computed<any>, seen?: Set<any>): any {
 
 /** Drop the readers that settled or died. Settled: a loading reader no
  * longer pending; an error's source neither errored nor in flight, or no
- * longer read by the reader that caught it: the boundary waits on what threw
- * only while such a reader is alive. One that re-ran clean (the tree, a
- * memo-only read gated away) holds nothing, and a reader outside the
- * boundary — a hoisted memo, a derived store, a reader under another
- * boundary — never caught its error (D-39, #4644). A reader
- * that landed but is held (its value staged in a transaction) is not: the
- * content reveals at the commit, with its run. The tree is: the output reads
- * it and enters the transaction itself (its committed value shows until the
- * landing). The statuses that keep a reader: pending — and its error, for an
- * error boundary (`_type` is the status it catches) — on the reader or its
- * source. A reader pending again after the source that threw answered (it
- * re-asks through a memo that carried the error) has no new answer yet: the
- * error stays the display (D-39: a pending is not a value) — unless a loading
- * boundary under the error one catches it (`caughtBelow`): the recovery shows
- * with that boundary's fallback (ruled 2026-11-02, #4627; async-gen 91501
- * #1831).
+ * longer read by the reader that caught it (D-41, #4644). A held reader is
+ * not settled: the content reveals at the commit. A reader pending again
+ * after the source that threw answered has no new answer yet: the error
+ * stays the display (D-41), unless a loading boundary under the error one
+ * catches it (`caughtBelow`, #4627).
  *
- * `pass` 0: a reader clearing asks whether it was the last (`catchStatus`),
- * once per clear. The first reader kept by its status ends the walk — one
- * is left — and the ones behind it wait for a later prune, so a recovery of
- * N readers walks each once, not N²/2 times (#4526). */
+ * `pass` 0: a reader clearing asks whether it was the last (`catchStatus`).
+ * The first kept reader ends the walk, so a recovery of N readers walks
+ * each once (#4526). */
 export function prune(b: Boundary, pass?: boolean | 0): number {
   const mask = b._type | STATUS_PENDING;
   for (const [r, s] of b._readers) {
     if (!((r._flags | s._flags) & REACTIVE_DISPOSED)) {
-      // An error staged on its source (D-41, `stageError`) is not settled:
-      // it publishes with the commit. A reader that threw it now (a lane
-      // pass, a reader of a node born staged) reached the boundary first
-      // (#4364). Nor a verdict reader queued to re-derive: its source
-      // settling retired the pending it carried, and its pass, not that
-      // retirement, is its answer (A19) — it may ask the next flight. Judged
-      // settled before it ran, a fresh boundary revealed into a hold its
-      // pass then went pending in, which waited on that flight (#4568).
+      const k = keeps(b, r);
+      // An error staged on its source is not settled: it publishes with the
+      // commit (D-41, #4364). Nor a verdict reader queued to re-derive: its pass,
+      // not its source's settling, is its answer (F-9, #4568).
       if (
-        ((r._statusFlags & mask || (s._statusFlags & mask && reads(r, s))) &&
+        ((r._statusFlags & k || (s._statusFlags & k && reads(r, s))) &&
           !(mask & STATUS_ERROR && caughtBelow(b, r, s))) ||
         (mask & STATUS_ERROR && s._config & CONFIG_STAGED_ERROR) ||
         (r._config & CONFIG_VERDICT && r._flags & REACTIVE_IN_HEAP)
@@ -462,7 +453,7 @@ export function prune(b: Boundary, pass?: boolean | 0): number {
         // what it caught in a hold was that hold's staged error (D-41), and an
         // answer landing in the same hold replaces it there — the content
         // reveals with the commit, and nothing ever shows the superseded
-        // error (D-39, #4527).
+        // error (D-41, #4527).
         if (!pass || !b._initialized) continue;
         joinFuture(txOf(s));
       }
@@ -520,15 +511,10 @@ function boundarySeam(): void {
             }
     prune(b);
     const o = b._output!;
-    // A fallback staged into the very hold its readers landed in folds back
-    // (D-16, U-9): the content is ready when that hold commits (D-15). Not
-    // only at the re-arm's own seam: readers pending then land, held, a
-    // flush later (#4379 — the staged fallback otherwise commits with the
-    // hold, and a quiet refresh then caught keeps it up, F-9). A loading
-    // fallback only: what an error boundary still waits on after `prune` is
-    // an error, staged into that hold (D-41) — the fallback is the hold's
-    // content and reveals with it; folding back re-derived the output into
-    // the error again every round (#4480).
+    // A fallback staged into the very hold its readers landed in folds back:
+    // the content is ready when that hold commits (D-17, #4379). A loading
+    // fallback only: an error boundary's is that hold's staged error (D-41),
+    // and folding back re-derived the output into it every round (#4480).
     if (
       b._type & STATUS_PENDING &&
       !b._initialized &&
@@ -570,7 +556,7 @@ function reportOutsideHold(b: Boundary): void {
     }
     // Behind a fallback, or under a boundary whose output only such content
     // reads — an error boundary built outside `b`: the fallback is seen
-    // (D-16, #4639).
+    // (D-17, #4639).
     const rb = boundaryOf(reader);
     if (hiddenBy(reader) || (rb?._tree === reader && rb._output && hiddenBy(rb._output)))
       return false;
@@ -582,7 +568,7 @@ function reportOutsideHold(b: Boundary): void {
     const sources = r._x?._pendingSources;
     if (sources === undefined) continue;
     for (const source of sources) {
-      // Only the flight the change itself started (D-16): an outside reader
+      // Only the flight the change itself started (D-17): an outside reader
       // of an earlier write's flight holds nothing the change waits on.
       if (source._time !== clock) continue;
       for (let s = source._subs; s !== null; s = s._nextSub) {
@@ -635,7 +621,7 @@ function arm(b: Boundary): void {
     return;
   }
   b._armed = true;
-  // The swap is the change's work: the output joins it (D-13, #3540).
+  // The swap is the change's work: the output joins it (D-12, #3540).
   b._output!._config &= ~CONFIG_FRAME;
   // A verdict read in `on` (`isPending`, or a memo of one — #3528's
   // `createMemo(() => isPending(m2))`: the mark carries, core.ts `read`)
@@ -661,10 +647,9 @@ function arm(b: Boundary): void {
       b._readers.size !== n ||
       (r._statusFlags & STATUS_PENDING && !(r._flags & REACTIVE_DISPOSED))
     ) {
-      // What it collects was forwarded through it to the boundaries above
-      // too (`catchStatus` records a reader in every boundary on the way).
-      // It is this boundary's alone now (B5, the nearest catcher): an outer
-      // re-armed by the same tick does not wait for it (D-14, U-4).
+      // What it collects was forwarded to the boundaries above too; it is this
+      // boundary's alone now, the nearest catcher: an outer one re-armed by the
+      // same tick does not wait for it (D-12).
       for (let a = b._parent; a !== null; a = a._parent)
         // An outer error boundary keys its readers too, but waits on their
         // sources: a re-armed Loading taking the pending does not settle it.
@@ -803,7 +788,7 @@ function createBoundary<T>(
       // reads a hold it is not part of as the screen, as the render effect
       // flattening the same children without a boundary would. Not while a
       // re-arm's swap is the change's work (`arm`), until that swap commits
-      // (D-13, #3540).
+      // (D-12, #3540).
       const self = getOwner() as Computed<any>;
       // Reading the retained tree need not read the leaf that recovered.
       // Keep the ahead swap's lane for recovery as well as for the fallback;
@@ -837,13 +822,17 @@ function createBoundary<T>(
           return fallback(b);
         }
       }
-      // A tree carrying a status is not read: an errored memo's reactive
-      // re-read retries it (`read`), and neither a fallback re-rendering nor
-      // passing the error by may re-run the content; a pending one read as
-      // lane work would serve its committed value (A31) — the swap a
-      // display-ahead `on` causes is the lane's, and must still be the
-      // fallback. Linked, so its recovery re-derives this pass; read again
-      // once clean.
+      // A tree carrying a status is not read: an errored memo's re-read retries
+      // it (F-9), and a pending one read as lane work would serve its committed
+      // value (D-25) where the swap must still be the fallback. Linked, so its
+      // recovery re-derives this pass. A swap to the fallback staged in a hold
+      // leaves the content on screen: a lane pass derives it with its guesses
+      // (D-17, D-33, F-1, #4999).
+      const shown =
+        laneStageHook &&
+        !b._initialized &&
+        self._config & CONFIG_HELD &&
+        self._value !== b._fb?._value;
       const status = tree._statusFlags & (STATUS_PENDING | STATUS_ERROR);
       if (status !== 0) {
         link(tree, self);
@@ -856,22 +845,23 @@ function createBoundary<T>(
           // holds the frame like any reader (recorded for its `on`).
           record(b, tree);
         }
-        // A pending passes an error boundary by (A6); an error, a loading
-        // one; a loading boundary showing content forwards its pending.
+        // An error boundary on its fallback is the display of everything
+        // under it (F-3, F-12): a retry pending there (an error returned
+        // above, so this status is a pending) keeps the fallback and
+        // holds nothing outside it — the recovery re-derives this pass. Not
+        // when the loading boundary above has not shown content (fresh, or
+        // behind an error fallback, #4627): this fallback was never on
+        // screen, and that boundary catches the pending (F-4, #4926).
+        if (type === STATUS_ERROR && b._fallback && !freshAbove(b)) return fallback(b);
+        // A pending passes an error boundary by (D-38); an error, a loading one; a
+        // loading boundary showing content forwards its pending.
         throw tree._x!._error;
       }
       if (isCollecting(b)) {
-        // A29's boundary exemption (#3540): a boundary MOUNTED over a held
-        // value (its first pass; a first pass under it that read a hold was
-        // collected, `joinPass` — the tree's own, or a render effect's that
-        // binds the content) shows its fallback now and the content at the
-        // commit — entering the transaction would make the output itself
-        // born held, and nothing would show until the commit. The seam
-        // keeps a held reader until it is committed, then re-derives this
-        // pass. A boundary with a committed value reads a held tree and
-        // enters: the outside sees its committed value until the landing,
-        // which reveals the content — a fallback staged earlier is replaced
-        // ahead of the commit and never shown.
+        // A boundary mounted over a held value shows its fallback now and the
+        // content at the commit (F-7, #3540): entering the transaction would make
+        // the output born held. One with a committed value reads a held tree and
+        // enters: the landing reveals the content.
         if (
           b._readers.size !== 0 &&
           self._statusFlags & STATUS_UNINITIALIZED &&
@@ -880,11 +870,15 @@ function createBoundary<T>(
           return fallback(b);
         // Readers under it still unready: the fallback, the tree untouched.
         // The seam re-derives this pass when they settle.
-        if (prune(b, true) !== 0) return fallback(b);
+        if (prune(b, true) !== 0 && !shown) return fallback(b);
       }
       let value: T;
       try {
         value = read(tree);
+        // Returned content that is a store carries its family's error: the
+        // probe reads it here, where the boundary catches it (F-12, D-41).
+        // Left to `handleAsync`'s probe, it is the output's own error.
+        if (b._error) untrack(() => isThenable(value));
       } catch (e) {
         if (e instanceof NotReadyError ? type === STATUS_PENDING : type === STATUS_ERROR) {
           if (isCollecting(b)) {
@@ -897,17 +891,23 @@ function createBoundary<T>(
           // holds the frame like any reader (recorded for its `on`).
           record(b, tree);
         }
-        // A pending passes an error boundary by (A6).
+        // A pending passes an error boundary by (D-38).
         throw e;
       }
-      // Readers under it still unready (caught before, or while the read
-      // ran the content at a mount): the fallback.
-      if (isCollecting(b) && b._readers.size !== 0) return fallback(b);
+      // Readers under it still unready: the fallback. So is a tree the read
+      // itself ran into a pending: as lane work it is served the committed tree
+      // (D-25), and the pass under it could not re-derive this one mid-pass
+      // (#4856).
+      if (isCollecting(b)) {
+        if (tree._statusFlags & type & STATUS_PENDING) caught(b, tree);
+        if (b._readers.size !== 0) return shown && passLane ? value : fallback(b);
+      }
       b._initialized = true;
       // Observe: the fallback stops showing (a hide before its commit means
       // it never displayed — the engine knows the swap it was staged with).
       if (__OBSERVE__ && b._fallback && b._type & STATUS_PENDING && attrHooks !== null)
         attrHooks.boundaryFallback(b, b._tree, false);
+      if (b._fallback && swapHook) swapHook();
       b._fallback = false;
       // The fallback dies when the content that replaces it is on screen —
       // with this flush's commits when the pass is the frame's, at the
@@ -965,22 +965,17 @@ function fallback<T>(b: Boundary): T {
     out._flags |= REACTIVE_LANE_READ;
     b._lane = null;
   }
-  // Observe: a loading boundary starts showing its fallback — the swap lands
-  // with the frame's transaction, or this drain commits it (lane work, or no
-  // transaction). A mount's synchronous first show has no drain of its own:
-  // one is scheduled so the engine's display instant (`flushEnd`) comes.
-  if (__OBSERVE__ && !b._fallback && b._type & STATUS_PENDING && attrHooks !== null) {
-    attrHooks.boundaryFallback(
-      b,
-      b._tree,
-      true,
-      passLane !== null ? null : flushTransaction !== null ? resolveTx(flushTransaction) : passTx
-    );
-    if (!globalQueue._running) schedule();
-  }
+  // Observe: a loading boundary starts showing its fallback. The swap is the
+  // output's value; the engine watches it and counts the fallback displayed
+  // when the screen shows it (a commit, a landing, a lane's reveal).
+  if (__OBSERVE__ && !b._fallback && b._type & STATUS_PENDING && attrHooks !== null)
+    attrHooks.boundaryFallback(b, b._tree, true, out);
+  // The content goes behind the fallback: off screen (F-3), and so are its
+  // head tags (`swapHook`, #4873).
+  if (!b._fallback && swapHook) swapHook();
   b._fallback = true;
   // Built in its own scope, like `Show`'s function child, once per show
-  // (D-39: the fallback is the display until a new answer replaces the
+  // (D-41: the fallback is the display until a new answer replaces the
   // error): a re-derive of the output while it shows — a second reader
   // caught, the same error propagated again through a sibling's re-run, a
   // retry pending after `reset()`, a later error — keeps the built
@@ -992,7 +987,7 @@ function fallback<T>(b: Boundary): T {
   // ids a build under the output would; disposed once content is on screen.
   // Lazy (`1`: a byte under `true`), so its first pass runs in the output's
   // read below: the pass that creates it is the output's, and born held asks
-  // the output — what it read — not the owner the fallback lives in (D-27;
+  // the output — what it read — not the owner the fallback lives in (D-25;
   // #4428: an enclosing pass that joined a hold, while the output read nothing
   // held). (Lazy also releases it when its one reader, the output, stops
   // reading it: where `drop` below disposes it, or with the commit of a held

@@ -59,9 +59,28 @@ export function isStatementVariableInitializer(path: NodePath): boolean {
  * `else` or loop body it returns the whole `if` or loop: setup inserted there
  * runs on every path, and outside the loop's bindings. Inserting before the
  * return lets Babel wrap that body in a block.
+ *
+ * JSX in a later declarator (`const a = 1, b = <div>{a}</div>`, the shape
+ * minifiers make by joining declarations) splits the declarators before it
+ * into their own statement first, so its setup runs after them.
  */
 export function getSetupStatement(path: NodePath): NodePath | null {
-  return t.isReturnStatement(path.parent) ? path.parentPath : path.getStatementParent();
+  if (t.isReturnStatement(path.parent)) return path.parentPath;
+  const statement = path.getStatementParent();
+  const declaration = path.parentPath?.parentPath;
+  if (statement && declaration?.isVariableDeclaration()) {
+    const index = declaration.node.declarations.indexOf(path.parent as t.VariableDeclarator);
+    if (index > 0) {
+      const before = t.variableDeclaration(
+        declaration.node.kind,
+        declaration.node.declarations.splice(0, index)
+      );
+      statement.insertBefore(
+        statement.isExportNamedDeclaration() ? t.exportNamedDeclaration(before) : before
+      );
+    }
+  }
+  return statement;
 }
 
 export function getConfig(path: NodePath): PluginConfig {
@@ -624,10 +643,9 @@ export function escapeHTML(s: unknown, attr?: boolean): unknown {
   if (typeof s !== "string") return s;
   if (attr) {
     // Attr mode escapes `&` `"` AND `<` (compile-time statics half of the
-    // runtime's ESCAPE_ATTR invariant: a raw "<select" byte sequence in SSR
-    // output is always a genuine tag start — resolveSSRSelectValues
-    // region-jumps on it). Amp first so entities aren't double-escaped;
-    // compile-time only, so plain replaces beat pointer games.
+    // runtime's ESCAPE_ATTR: a raw `<` byte in SSR output is always a
+    // genuine tag start, React/octane norms). Amp first so entities aren't
+    // double-escaped; compile-time only, so plain replaces beat pointer games.
     if (!/[&"<]/.test(s)) return s;
     return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   }
@@ -836,7 +854,8 @@ const templateEscapes = new Map([
 // literals downstream. @babel/types 8's builder rejects negative and
 // non-finite values (`t.valueToNode` builds `-1` / `0 / 0` expressions
 // instead), so those are built as plain nodes; generators print them as
-// `-1` / `NaN` / `Infinity`, as Babel 7's builder did.
+// `-1` / `NaN` / `Infinity`, as Babel 7's builder did (@babel/generator
+// 8.1.3+ prints NaN as `(0 / 0)` and Infinity as `1e999`).
 export function numberLiteral(value: number): t.NumericLiteral {
   if (value >= 0 && Number.isFinite(value) && !Object.is(value, -0)) return t.numericLiteral(value);
   const node = { type: "NumericLiteral", value } as t.NumericLiteral;
