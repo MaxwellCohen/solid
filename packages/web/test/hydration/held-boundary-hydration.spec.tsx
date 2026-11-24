@@ -31,6 +31,7 @@
  *   does not take the swapped-in content out;
  * - `fresh-over-span`: a boundary that renders fresh, because its module
  *   failed to load, releases its span list and the ones under it;
+ * - `fresh-over-swap`: so does a nested fragment's swapped-in node list;
  * - `under-held`, `under-held-collapsed`: a fragment, or a collapsed slot's
  *   fallback, that lands inside content its enclosing boundary has not
  *   claimed yet waits for its own boundary, and is claimed with the rest;
@@ -472,6 +473,35 @@ describe("a boundary that cannot claim yet holds its place", () => {
         expect(page.main().textContent).toBe("a:0b:0");
         expect(served.isConnected).toBe(false);
         expect(Object.keys(page.hy.hs ?? {})).toEqual([]);
+      },
+      /module preload failed/
+    ));
+
+  // The inner fragment swaps in first: its node list goes back to 1 when
+  // the outer boundary renders fresh over it.
+  test("fresh-over-swap: a fresh render releases a nested swap's node list", () =>
+    withPage(
+      "fresh-over-swap",
+      async page => {
+        const { shell, chunks } = recording("fresh-over-swap");
+        const [markup, ...scripts] = steps(page.container, shell, true);
+        markup();
+        for (const run of scripts) run();
+        const fail = page.failNextLoad();
+        page.start();
+        await settle();
+        for (const chunk of chunks) {
+          for (const run of steps(page.container, chunk, false)) run();
+          await settle();
+        }
+        const swapped = Object.keys(page.hy.v ?? {}).filter(k => (page.hy.v[k] as any).splice);
+        expect(swapped.length).toBe(1);
+        fail();
+        await settle();
+        page.land();
+        await settle();
+        expect(page.main().textContent).toBe("a:0b:0");
+        expect(swapped.map(k => page.hy.v[k])).toEqual([1]);
       },
       /module preload failed/
     ));

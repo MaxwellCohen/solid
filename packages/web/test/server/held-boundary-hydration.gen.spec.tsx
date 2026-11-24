@@ -20,7 +20,8 @@ const LAZY = [
   "between",
   "root",
   "preload-retry",
-  "fresh-over-span"
+  "fresh-over-span",
+  "fresh-over-swap"
 ];
 // settled in the shell: nothing streams
 const SHELL = ["reorder", "reorder-claimed", "beside", "no-hydration", "root", "fresh-over-span"];

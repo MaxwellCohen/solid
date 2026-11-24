@@ -2395,6 +2395,10 @@ function resumeBoundaryHydration(
   // client-gated nodes the resume created compute in the flush below). A
   // claiming resume turns it on for its window alone.
   _hydratingValue = false;
+  // Rendered fresh over the server markup this boundary held: its span list
+  // is that markup as the document has it now (later swaps under it
+  // included), where the slot's own record of it may be older.
+  if (!shouldHydrate) (globalThis as any)._$HY?.hs?.[id]?.forEach((n: ChildNode) => n.remove());
   shouldHydrate
     ? // A late resume claims against the root this boundary registered under
       // (the captured `scope`), its subtree the snapshot and live scope for
@@ -2418,9 +2422,9 @@ function resumeBoundaryHydration(
       // the registry) computes.
       servedPass(set, shouldHydrate === 0 && o)();
   flush();
-  // A fresh render took out the server markup of the boundaries under this
-  // one, which never hydrate to drop their lists: a list left with no node
-  // in the document only keeps them alive.
+  // A fresh render takes out server markup whose boundaries never hydrate
+  // to drop their lists (those under this one): any list left with no node
+  // in the document only keeps nodes alive.
   if (!shouldHydrate) {
     const hy = (globalThis as any)._$HY;
     for (const m of [hy?.v, hy?.hs])

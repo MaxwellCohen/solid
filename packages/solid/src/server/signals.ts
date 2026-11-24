@@ -4212,8 +4212,11 @@ export function rangeClose(html: string, at: number): number {
       if (i === -1) return -1;
     } else if (((TAG.lastIndex = i), (m = TAG.exec(html)))) {
       i = TAG.lastIndex;
-      if (/^(script|style|textarea|title|xmp|iframe|noembed|noframes)$/i.test(m[1]))
-        i = Math.max(i, html.indexOf("</" + m[1], i));
+      if (/^(script|style|textarea|title|xmp|iframe|noembed|noframes)$/i.test(m[1])) {
+        const close = new RegExp("</" + m[1], "gi");
+        close.lastIndex = i;
+        i = close.exec(html)?.index ?? i;
+      }
     } else i++;
   }
   return -1;

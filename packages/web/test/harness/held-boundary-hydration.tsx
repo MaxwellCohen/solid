@@ -34,6 +34,7 @@ export const SHAPES = [
   "root",
   "preload-retry",
   "fresh-over-span",
+  "fresh-over-swap",
   "under-held",
   "under-held-collapsed",
   "throws",
@@ -228,6 +229,18 @@ export function createHeldApp(shape: Shape) {
             </Wait>
           </Loading>
         </>
+      ) : shape === "fresh-over-swap" ? (
+        // A boundary waiting on its module holds one whose fragment streams.
+        <Loading fallback={<i>f</i>}>
+          <LateBox>
+            <Item name="a" />
+            <Loading fallback={<i>g</i>}>
+              <Wait ms={10}>
+                <Item name="b" />
+              </Wait>
+            </Loading>
+          </LateBox>
+        </Loading>
       ) : shape === "fresh-over-span" ? (
         // A boundary waiting on its module holds another one that does.
         <Loading fallback={<i>f</i>}>
