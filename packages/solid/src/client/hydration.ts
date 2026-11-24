@@ -3132,10 +3132,18 @@ function hydratedCreateLoadingBoundary<T, U>(
       // The swap takes the range this boundary shows out of the document, so
       // the boundary resumes at the swap, not at the settlement the wire
       // delivers after it: unsettled, the resume holds the content's place.
+      // (It runs inside the inline runtime's swap: an error the resume does
+      // not catch must not stop the runtime, and is thrown from a microtask.)
       const again = () => {
         off();
         settledSerializationResumeQueued = false;
-        resume(true);
+        try {
+          resume(true);
+        } catch (err) {
+          queueMicrotask(() => {
+            throw err;
+          });
+        }
       };
       const off = subscribeFragments(swapped => swapped === id && hy.v?.[id] && again());
       onCleanup(off);

@@ -4,8 +4,8 @@
  * Boundaries the client cannot claim yet — the content's `lazy()` module has
  * not loaded, or the fragment has not arrived — while the page around them
  * moves on: an enclosing boundary resumes, a list reorders, a `<Show>` hides
- * the boundary, a collapsed `<Reveal>` shows the next fallback, the stream is
- * cut.
+ * the boundary, a collapsed `<Reveal>` shows the next fallback (which may
+ * fail to hydrate), text follows the boundary in its slot, the stream is cut.
  *
  * Compiled with both generates: test/server/held-boundary-hydration.gen.spec.tsx
  * writes the chunks test/hydration/held-boundary-hydration.spec.tsx replays.
@@ -21,6 +21,8 @@ export const SHAPES = [
   "pending",
   "pending-text",
   "collapsed",
+  "tail",
+  "throws",
   "cut"
 ] as const;
 export type Shape = (typeof SHAPES)[number];
@@ -51,6 +53,12 @@ export function createHeldApp(shape: Shape) {
   const [order, setOrder] = createSignal(["a", "b", "c"]);
   const [label, setLabel] = createSignal("wait");
   const ms = (k: string) => 10 * (1 + "abc".indexOf(k));
+  // A fallback that fails where it hydrates, once armed (the client).
+  let armed = false;
+  const Boom = () => {
+    if (armed) throw new Error("boom");
+    return <i>wait b</i>;
+  };
   const App = () => (
     <main>
       {shape === "nested" ? (
@@ -101,6 +109,30 @@ export function createHeldApp(shape: Shape) {
             </Loading>
           )}
         </For>
+      ) : shape === "tail" ? (
+        <>
+          <Loading fallback={<i>f</i>}>
+            <Wait ms={10}>
+              <Item name="a" />
+              <u>u</u>
+              {"more"}
+            </Wait>
+          </Loading>
+          {"tail"}
+        </>
+      ) : shape === "throws" ? (
+        <Reveal collapsed>
+          <Loading fallback={<i>wait a</i>}>
+            <Wait ms={10}>
+              <Item name="a" />
+            </Wait>
+          </Loading>
+          <Loading fallback={<Boom />}>
+            <Wait ms={30}>
+              <Item name="b" />
+            </Wait>
+          </Loading>
+        </Reveal>
       ) : shape === "collapsed" ? (
         <Reveal collapsed>
           <Loading fallback={<i>{label()} a</i>}>
@@ -131,6 +163,7 @@ export function createHeldApp(shape: Shape) {
     preload: () => LateBox.preload(),
     hide: () => setShow(false),
     reverse: () => setOrder(o => [...o].reverse()),
-    relabel: () => setLabel("still")
+    relabel: () => setLabel("still"),
+    arm: () => (armed = true)
   };
 }

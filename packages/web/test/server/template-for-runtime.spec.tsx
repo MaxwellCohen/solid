@@ -110,6 +110,28 @@ describe("$df with templateFor ranges", () => {
     expect(section.firstChild!.nodeValue).toBe("?start");
   });
 
+  test("a shown fallback drops the patch that shows it with scripts off", () => {
+    document.body.innerHTML =
+      '<!--?start name="C"--><template id="pl-C"><i>wait</i></template><!--?end-->' +
+      '<template for="C"><!--?start name="C"--><i>wait</i><!--?end--></template>' +
+      '<template id="C" for="C"><b>done</b></template>';
+    boot();
+    (globalThis as any).$dfl("C");
+    expect(document.querySelectorAll("i").length).toBe(1);
+    // the content template (it has an id) stays for its swap
+    expect([...document.querySelectorAll("template[for]")].map(t => t.id)).toEqual(["C"]);
+  });
+
+  test("a shown fallback calls the client's hook for its id", () => {
+    document.body.innerHTML =
+      '<!--?start name="C"--><template id="pl-C"><i>wait</i></template><!--?end-->';
+    boot();
+    const shown = vi.fn(() => expect(document.querySelector("body > i")).not.toBe(null));
+    (globalThis as any)._$HY.fl = { C: shown };
+    (globalThis as any).$dfl("C");
+    expect(shown).toHaveBeenCalledOnce();
+  });
+
   test("patched natively all the same: $df records the reveal", () => {
     document.body.innerHTML = "<p>a</p><b>done</b><p>z</p>";
     const fe = boot();
@@ -158,6 +180,17 @@ describe("$df with templateFor ranges", () => {
     const img = foreign.firstElementChild!;
     expect(img.localName).toBe("img");
     expect(img.namespaceURI).toBe("http://www.w3.org/1999/xhtml");
+  });
+
+  test("SVG placeholder: a collapsed fallback is the placeholder's children", () => {
+    // Inside <svg> `<template>` is a foreign element: no `content`.
+    document.body.innerHTML =
+      '<svg id="c"><template id="pl-V"><desc>wait</desc></template><!--pl-V--></svg>';
+    boot();
+    (globalThis as any).$dfl("V");
+    const shown = document.getElementById("pl-V")!.nextSibling as Element;
+    expect(shown.localName).toBe("desc");
+    expect(shown.namespaceURI).toBe(SVG);
   });
 
   test("MathML placeholder: content is reparsed into the MathML namespace", () => {

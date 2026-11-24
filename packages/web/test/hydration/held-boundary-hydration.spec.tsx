@@ -14,6 +14,9 @@
  *   whole placeholder range, and each fragment lands at its row;
  * - `collapsed`: the fallback the inline runtime shows for the next slot of
  *   a collapsed `<Reveal>` is hydrated;
+ * - `tail`: text after the boundary in the same slot keeps its own node;
+ * - `throws`: an error in the resume the inline runtime starts does not stop
+ *   the runtime;
  * - `cut`: a stream cut before the fragment renders the content fresh, its
  *   `lazy()` loading through its own import.
  *
@@ -23,7 +26,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { flush } from "solid-js";
+import { flush, resetErrorHalt } from "solid-js";
 import { hydrate } from "@solidjs/web";
 import { createHeldApp, Late, type Shape } from "../harness/held-boundary-hydration.jsx";
 import { bootstrapHydrationGlobal } from "../harness/hydration-bootstrap.js";
@@ -75,7 +78,7 @@ type Page = {
   hydrated: () => boolean;
 };
 
-async function withPage(shape: Shape, body: (page: Page) => Promise<void>) {
+async function withPage(shape: Shape, body: (page: Page) => Promise<void>, expected?: RegExp) {
   const hy = bootstrapHydrationGlobal();
   delete (globalThis as any).$R;
   // Every module the client is asked to load is the late one, held at `land`.
@@ -103,7 +106,7 @@ async function withPage(shape: Shape, body: (page: Page) => Promise<void>) {
       hydrated: () => !!dispose
     });
     const diagnostics = [...warn.mock.calls, ...error.mock.calls].map(c => String(c[0]));
-    expect(diagnostics).toEqual([]);
+    expect(diagnostics.filter(d => !expected?.test(d))).toEqual([]);
   } finally {
     dispose?.();
     container.remove();
@@ -255,6 +258,61 @@ describe("a boundary that cannot claim yet holds its place", () => {
       expect(page.hy.done).toBe(true);
     })
   );
+
+  everyStart("tail", startAt =>
+    withPage("tail", async page => {
+      const { chunks } = recording("tail");
+      await replay(page, "tail", startAt, 0, undefined, chunk => {
+        if (chunk) expect(page.main().textContent).toBe("a:0umoretail");
+      });
+      expect(chunks.length).toBeGreaterThan(0);
+      const a = page.container.querySelector("#a") as any;
+      expect(a.$server).toBe(true);
+      expect(page.container.querySelectorAll("i").length).toBe(0);
+      a.click();
+      flush();
+      expect(page.main().textContent).toBe("a:1umoretail");
+      expect(page.hy.done).toBe(true);
+    })
+  );
+
+  test("throws: an error in a resume the inline runtime starts does not stop the runtime", () =>
+    withPage(
+      "throws",
+      async page => {
+        const { shell, chunks } = recording("throws");
+        // The resume rethrows from a microtask: collect it there.
+        const thrown: unknown[] = [];
+        const queue = globalThis.queueMicrotask;
+        globalThis.queueMicrotask = fn =>
+          queue(() => {
+            try {
+              fn();
+            } catch (err) {
+              thrown.push(err);
+            }
+          });
+        try {
+          for (const run of steps(page.container, shell, true)) run();
+          page.start();
+          await settle();
+          page.app.arm();
+          // Slot a is swapped in and slot b's fallback shown: hydrating it throws.
+          for (const chunk of chunks) {
+            for (const run of steps(page.container, chunk, false)) run();
+            await settle();
+          }
+          expect(thrown.map(e => (e as Error).message)).toContain("boom");
+          // The stream still landed: both slots show the server's content
+          // (unclaimed: the client halted).
+          expect(page.main().textContent).toBe("a:0b:0");
+        } finally {
+          globalThis.queueMicrotask = queue;
+          resetErrorHalt();
+        }
+      },
+      /REACTIVITY_HALTED|boom|unclaimed server-rendered/
+    ));
 
   // Last: the ledger's truncation record is module state, and a boundary id
   // it marks stays marked for the rest of the file.

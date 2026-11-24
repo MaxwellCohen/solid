@@ -4194,6 +4194,21 @@ function record(
   return wire;
 }
 
+// Whether `t`, which opens a patching range, is that range and nothing
+// after it: the `<?end>` that balances its `<?start>` is the last thing in it.
+function isOneRange(t: string): boolean {
+  for (let at = 0, depth = 0; ; ) {
+    const end = t.indexOf("<?end>", at);
+    const start = t.indexOf("<?start ", at);
+    if (end < 0) return false;
+    if (start >= 0 && start < end) {
+      depth++;
+      at = start + 8;
+    } else if (--depth) at = end + 6;
+    else return end === t.length - 6;
+  }
+}
+
 export function createErrorBoundary<T, U>(
   fn: () => T,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
@@ -4423,7 +4438,7 @@ export function createErrorBoundary<T, U>(
           !(
             (t.startsWith(`<template id="pl-${outcome}"`) && t.endsWith(`<!--pl-${outcome}-->`)) ||
             (t.startsWith(`<?start name="${outcome}"><template id="pl-${outcome}"`) &&
-              t.endsWith("<?end>"))
+              isOneRange(t))
           ))
     )
       return undefined;

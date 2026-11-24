@@ -85,6 +85,14 @@ const Slot = (p: { name: string; ms: number }) => (
   </Loading>
 );
 
+// Settles before the shell flushes, `turns` microtask turns in.
+const Ready = (p: { name: string; turns?: number }) => {
+  const settle = (n: number): Promise<string> =>
+    n ? Promise.resolve().then(() => settle(n - 1)) : Promise.resolve(p.name.toUpperCase());
+  const v = createMemo(() => settle(p.turns || 0));
+  return <b>{v()} </b>;
+};
+
 // a settles last, b first, c second
 const slots = () => [
   <Slot name="a" ms={60} />,
@@ -192,5 +200,24 @@ describe("templateFor: <Reveal> patched natively with scripts off", () => {
     expect(activation).toBeGreaterThan(fors[0]);
     // the runtime (and its disarm pass) still precedes the first `for` template
     expect(html.indexOf("$dpi(document)")).toBeLessThan(fors[0]);
+  });
+
+  // Slot a settles while the enclosing boundary is still pending, so slot
+  // b's fallback patch waits on that boundary, which then inlines.
+  test("collapsed in a boundary that settles with the shell: the frontier's fallback shows", async () => {
+    const states = await timeline(() => (
+      <Loading fallback={<i>outer… </i>}>
+        <Ready name="o" turns={6} />
+        <Reveal collapsed>
+          <Loading fallback={<i>a… </i>}>
+            <Ready name="a" />
+          </Loading>
+          <Slot name="b" ms={20} />
+          <Slot name="c" ms={40} />
+        </Reveal>
+      </Loading>
+    ));
+    expect(states).toContain("O A b…");
+    expect(states[states.length - 1]).toBe("O A B C");
   });
 });

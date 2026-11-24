@@ -1734,8 +1734,11 @@ function isAttrName(prop: string): boolean {
 //   A fragment the browser patched natively all the same (template and
 //   placeholder both gone, no reveal on record) is recorded as revealed.
 // - $dfl(id): materialize fallback from `pl-*` template content without resolving.
-//   Marker misses queue in `_$HY.dlq`, same reasoning as $dfr. Calls
-//   `_$HY.fl[id]` when the client left one: it hydrates the fallback shown.
+//   Marker misses queue in `_$HY.dlq`, same reasoning as $dfr. Inside
+//   <svg>/<math> the placeholder is a foreign element with no `content`:
+//   its children are the fallback. Drops the `templateFor` patch that shows
+//   the same fallback with scripts off, and calls `_$HY.fl[id]` when the
+//   client left one: it hydrates the fallback shown.
 // - $dflj(ids): materialize fallback content for every id in the list.
 // - $dfd(): drain both retry queues. Runs after every successful swap or fallback
 //   materialization — the only events that can bring queued markers into the live
@@ -1760,7 +1763,7 @@ function isAttrName(prop: string): boolean {
 //   again before the reparse, which keeps `<img>` wherever HTML content is.
 // - $dfg(id): group-style gate check; reveals a waiting group once all style counts hit zero.
 // - $dfj(ids): reveal a group in registration order, waiting if any member still has pending styles.
-const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dfx(o,e,d){for(d=0;o=o.nextSibling;)if(8==o.nodeType&&o.nodeValue=="pl-"+e||($dfm(o,"start")?!++d:$dfm(o,"end")&&!d--))break;return o}function $dpi(r,t,w,a){for(w=document.createTreeWalker(r,64),a=[];t=w.nextNode();)/^(start|end)$/.test(t.target)&&a.push(t);for(t of a)t.replaceWith(document.createComment("?"+t.target))}function $dfn(t,n,c,f,a){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;for(f of n.content.querySelectorAll("img")){c=document.createElement("image");for(a of f.attributes)c.setAttribute(a.name,a.value);f.replaceWith(c)}c=document.createElementNS(t.namespaceURI,t.localName);c.innerHTML=n.innerHTML;f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(c=$dfx(o,e);o!=c;)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...c.childNodes]:1,o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;if(n=$dfx(o,e)){o.parentNode&&($dpi(t=o.content.cloneNode(!0)),o.parentNode.insertBefore(t,n)),o._$fl=1,(t=_$HY.fl)&&t[e]&&t[e](),$dfd();return 1}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
+const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dfx(o,e,d){for(d=0;o=o.nextSibling;)if(8==o.nodeType&&o.nodeValue=="pl-"+e||($dfm(o,"start")?!++d:$dfm(o,"end")&&!d--))break;return o}function $dpi(r,t,w,a){for(w=document.createTreeWalker(r,64),a=[];t=w.nextNode();)/^(start|end)$/.test(t.target)&&a.push(t);for(t of a)t.replaceWith(document.createComment("?"+t.target))}function $dfn(t,n,c,f,a){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;for(f of n.content.querySelectorAll("img")){c=document.createElement("image");for(a of f.attributes)c.setAttribute(a.name,a.value);f.replaceWith(c)}c=document.createElementNS(t.namespaceURI,t.localName);c.innerHTML=n.innerHTML;f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(c=$dfx(o,e);o!=c;)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),(_$HY.v=_$HY.v||{})[e]=n.hasAttribute("e")?[...c.childNodes]:1,o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;if(n=$dfx(o,e)){o.parentNode&&((t=document.createDocumentFragment()).append(...(o.content||o).cloneNode(!0).childNodes),$dpi(t),o.parentNode.insertBefore(t,n)),o._$fl=1,(t=document.querySelector('template[for="'+e+'"]:not([id])'))&&t.remove(),(t=_$HY.fl)&&t[e]&&t[e](),$dfd();return 1}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
 
 // Head patch runtime, emitted once alongside the first head-patch task:
 // - $dha(ops): apply patch ops to document.head — "t" sets the title (and
@@ -2548,6 +2551,10 @@ export function renderToStream(code, options = {}) {
     // gating); eager (ungrouped, link-free) fragments self-activate with $df.
     // Grouped fragments defer to reveal().
     fragment(key, value, meta) {
+      // What waited on this content follows it, where the content can show
+      // with scripts off (a `for` template, below).
+      const waiting = waitingOn.get(key);
+      waitingOn.delete(key);
       const deferActivation = !!meta.revealGroup;
       const styles = meta.styles;
       // A rejected fragment's template is marked: its swap lists the nodes
@@ -2583,8 +2590,6 @@ export function renderToStream(code, options = {}) {
         // A native patch cannot wait: a fragment its reveal group holds, or
         // one nested in content not yet written, is held here (with the
         // `_fr` settle that announces it) and written when it may show.
-        const waiting = waitingOn.get(key);
-        if (waiting) waitingOn.delete(key);
         if (context.templateFor && meta.settle && (!meta.error || value)) {
           const entry = {
             key,
@@ -2620,7 +2625,6 @@ export function renderToStream(code, options = {}) {
     // that re-opens the range, so a later content patch still finds it.
     reveal(keys, meta) {
       if (meta.fallback) {
-        emitTask(`$dflj(${JSON.stringify(keys)})`);
         for (const key of keys) {
           const fallback = collapsedFallbacks.get(key);
           if (!fallback) continue;
@@ -2635,6 +2639,9 @@ export function renderToStream(code, options = {}) {
           const ancestor = unwrittenAncestor(key, true);
           ancestor ? ancestor.deps.push(entry) : commitNative(entry);
         }
+        // After the patches: with scripts on `$dfl` shows each fallback from
+        // its placeholder and drops the patch.
+        emitTask(`$dflj(${JSON.stringify(keys)})`);
         return;
       }
       const now = [];
@@ -2995,6 +3002,8 @@ export function renderToStream(code, options = {}) {
     if (tasks.length && !completed && firstFlushed) {
       buffer.write(`<script${nonceAttr(nonce, "script")}>${tasks}</script>`);
       tasks = "";
+      disarmed ||= runtimeQueued;
+      runtimeQueued = false;
     }
     timer = null;
   };
@@ -3007,6 +3016,11 @@ export function renderToStream(code, options = {}) {
   let completed = false;
   let shellCompleted = false;
   let scriptFlushed = false;
+  // The runtime's `$dpi` pass has run over the shell's body: written with
+  // the shell's own tasks it can load in `<head>`, ahead of every range.
+  let disarmed = false;
+  // The runtime is among the tasks not yet written.
+  let runtimeQueued = false;
   let headStyles;
   const revealGroups = new Map();
   // `templateFor` patches not yet written (see the sink's fragment()):
@@ -3026,8 +3040,15 @@ export function renderToStream(code, options = {}) {
   const unwrittenAncestor = (key, pending) => {
     let found;
     let at = 0;
+    // (A boundary in a held fragment's fallback shares its id prefix, and
+    // its placeholder is in the document: only the content's are held.)
     for (const [k, entry] of unwritten)
-      if (k.length < key.length && k.length > at && key.startsWith(k))
+      if (
+        k.length < key.length &&
+        k.length > at &&
+        key.startsWith(k) &&
+        entry.plain.includes(`<template id="pl-${key}"`)
+      )
         ((found = entry), (at = k.length));
     if (pending)
       for (const k of registry.keys())
@@ -3043,9 +3064,14 @@ export function renderToStream(code, options = {}) {
   // pass) goes ahead of the first `for` template: the browser would patch
   // that fragment past the reveal policy otherwise.
   const writeNative = tpl => {
-    if (!scriptFlushed && !noScripts) {
-      scriptFlushed = true;
-      buffer.write(`<script${nonceAttr(nonce, "script")}>${REPLACE_SCRIPT}</script>`);
+    if (!disarmed && !noScripts) {
+      // Queued tasks that carry the runtime go first.
+      runtimeQueued && writeTasks();
+      if (!disarmed)
+        buffer.write(
+          `<script${nonceAttr(nonce, "script")}>${scriptFlushed ? "$dpi(document)" : REPLACE_SCRIPT}</script>`
+        );
+      scriptFlushed = disarmed = true;
     }
     buffer.write(tpl);
   };
@@ -3058,6 +3084,16 @@ export function renderToStream(code, options = {}) {
     if (entry.task) emitTask(`$df("${entry.key}")`);
     entry.settle && entry.settle();
     flushDeps(entry);
+  };
+  // The patches waiting on pending fragment `key` wait on `to` instead: the
+  // fragment its content was spliced into, or (no `to`) the shell.
+  const rehome = (key, to) => {
+    const waiting = waitingOn.get(key);
+    if (!waiting) return;
+    waitingOn.delete(key);
+    let holder = to ? waitingOn.get(to) : (beforeShell ||= { deps: [] });
+    if (!holder) waitingOn.set(to, (holder = { deps: [] }));
+    holder.deps.push(...waiting.deps);
   };
   const flushDeps = entry => {
     const deps = entry.deps;
@@ -3085,6 +3121,7 @@ export function renderToStream(code, options = {}) {
   let timer = null;
   const emitTask = task => {
     pushTask(`${task}${!scriptFlushed ? ";" + REPLACE_SCRIPT : ""}`);
+    runtimeQueued ||= !scriptFlushed;
     scriptFlushed = true;
   };
   function resolveRevealKeys(groupOrKeys, release, consume) {
@@ -3373,6 +3410,7 @@ export function renderToStream(code, options = {}) {
             const parent = registry.get(parentKey);
             parent.children ||= {};
             parent.children[key] = value !== undefined ? value : "";
+            rehome(key, parentKey);
             serializeFragmentAssets(key, tracking.boundaryModules, context);
             propagateBoundaryStyles(key, parentKey, tracking);
             // The parent is the boundary that actually flushes; head
@@ -3388,6 +3426,7 @@ export function renderToStream(code, options = {}) {
               // the shell commits with the shell flush (its key is no longer
               // a pending fragment, so renderShellHead picks them up).
               queue(() => inlineFragment(key, value !== undefined ? value : ""));
+              rehome(key);
               serializeFragmentAssets(key, tracking.boundaryModules, context);
               item.resolve(error);
             } else {
@@ -3659,6 +3698,7 @@ export function renderToStream(code, options = {}) {
       head
     });
     tasks = "";
+    runtimeQueued = false;
     if (beforeShell) {
       const held = beforeShell;
       beforeShell = null;

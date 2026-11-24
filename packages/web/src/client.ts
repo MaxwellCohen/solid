@@ -2652,7 +2652,7 @@ export function hydrate(code, element, options = {}) {
       return [
         marker(start).startsWith("?start") ? [own(start), tpl] : tpl,
         own(rangeEnd(tpl, id)),
-        !tpl._$fl && !!tpl.content?.firstChild
+        !tpl._$fl && !!(tpl.content || tpl).firstChild
       ];
     }
   };
@@ -3306,12 +3306,16 @@ function insertExpression(parent, value, current, marker) {
   ) {
     // A primitive is the text node already at its position, as the commit
     // below adopts it: it must not read as a node this hole has yet to place.
+    // A stand-in (`_$h`) is one item for any number of nodes, so past one
+    // positions count from the end, and only a node with the same text is it.
     if (Array.isArray(value) && Array.isArray(current))
-      for (let i = 0, t, prev; i < value.length; i++)
-        if (
+      for (let i = 0, shift = 0, t, prev; i < value.length; i++)
+        if (value[i] && value[i]._$h) shift = current.length - value.length;
+        else if (
           ((t = typeof value[i]) === "string" || t === "number") &&
-          (prev = current[i]) &&
-          prev.nodeType === 3
+          (prev = current[i + shift]) &&
+          prev.nodeType === 3 &&
+          (!shift || prev.data === "" + value[i])
         ) {
           if (prev.data !== "" + value[i]) prev.data = prev._$d = value[i];
           value[i] = prev;
