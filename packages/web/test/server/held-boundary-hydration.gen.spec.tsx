@@ -31,6 +31,10 @@ for (const shape of SHAPES) {
     // a boundary with lazy content names the module's client entry
     expect((shell + rest).includes('_assets"]=')).toBe(LAZY.includes(shape));
     expect(chunks.length > 0).toBe(!SHELL.includes(shape));
+    // A boundary whose content loads a module marks the markup it holds.
+    expect(/<!--ph-(\w+)-->[\s\S]*<!--\/ph-\1-->/.test(shell + chunks.join(""))).toBe(
+      LAZY.includes(shape)
+    );
     writeArtifact(`held-boundary-hydration-${shape}`, { shell, chunks });
   });
 }

@@ -34,6 +34,24 @@ describe("$df with templateFor ranges", () => {
     expect((globalThis as any)._$HY.v.X.e).toBe(false);
   });
 
+  test("a nested swap keeps every node list that held its range current", () => {
+    document.body.innerHTML =
+      '<!--?start name="O"--><template id="pl-O"></template><i>o</i><!--?end-->' +
+      '<template id="O" for="O"><b>outer</b><!--?start name="I"--><template id="pl-I"></template>' +
+      "<i>wait</i><!--?end--><u>tail</u></template>" +
+      '<template id="I" for="I"><b>inner</b></template>';
+    boot();
+    const hy = (globalThis as any)._$HY;
+    (globalThis as any).$df("O");
+    const outer = hy.v.O;
+    hy.h = { S: [...outer] };
+    (globalThis as any).$df("I");
+    const names = (l: Node[]) => l.map(n => n.textContent);
+    expect(names(outer)).toEqual(["outer", "inner", "tail"]);
+    expect(names(hy.h.S)).toEqual(["outer", "inner", "tail"]);
+    expect(outer.every((n: Node) => n.isConnected)).toBe(true);
+  });
+
   test("a rejected fragment's record is marked: its nodes are the server's outcome", () => {
     document.body.innerHTML =
       '<!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--?end-->' +
