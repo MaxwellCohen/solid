@@ -701,10 +701,21 @@ function ssrLoadingBoundary(
     (retryPromise as any)?.$clientHole === true ||
     !!(ret as any)?.p?.some((p: any) => p.$clientHole);
 
+  // Content that loads a module the client may not have yet goes out between
+  // `<!--ph-ID-->` and `<!--/ph-ID-->`: the boundary holds that markup's
+  // place until it can claim it (the client lists it, `hydrate()`).
+  const span = (v: any) => {
+    if (!ctx.getBoundaryModules?.(id) || (parent && getContext(NoHydrateContext, parent))) return v;
+    const open = `<!--ph-${id}-->`,
+      close = `<!--/ph-${id}-->`;
+    return typeof v === "string" ? open + v + close : ctx.ssr([open, close], ctx.escape(v));
+  };
+
   let ret = runDiscovery();
   if (!retryPromise && !ret?.p?.length) {
     commitBoundaryState();
-    return skipLive(() => ret);
+    const content = span(ret);
+    return skipLive(() => content);
   }
 
   const regResult = revealGroup
@@ -866,7 +877,7 @@ function ssrLoadingBoundary(
           if (disposed) return abandon();
           if (discarded) return;
         }
-        const streamed = done!(value);
+        const streamed = done!(typeof value === "string" ? span(value) : value);
         record("settled", streamed);
       } catch (err) {
         // A failure whose outcome is still resolving settles when it lands.

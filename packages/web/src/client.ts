@@ -2632,20 +2632,53 @@ export function hydrate(code, element, options = {}) {
       if (m.startsWith("?start")) depth++;
     }
   };
-  // What a boundary shows while its content waits to claim server DOM: the
-  // nodes its fragment's swap inserted, when the list will stay what the
-  // document has (a nested pending range would be swapped under it, and a
-  // rejected fragment's nodes are the outcome an `<Errored>` claims). A
-  // comment that stands for the DOM otherwise (`_$h`, see insertExpression).
+  // A boundary that cannot claim yet shows the server markup it spans
+  // (`_$HY.h`), or its fragment's swap inserted (for a rejected fragment,
+  // the outcome an `<Errored>` drew): the list itself, which the runtime
+  // keeps current through later swaps (`$dfz`), so a render of the slot
+  // reads what the document has then.
   sharedConfig.holdPlace = (id, swapped) => {
-    if (swapped && swapped.e === false) {
-      // (Claims drop the text separators: they are no part of the list.)
-      const nodes = swapped.filter(n => n.nodeType !== 8 || n.nodeValue !== "!$");
-      if (nodes.every(n => n.isConnected && !/^pl-/.test(n.id))) return nodes;
-    }
-    const node = document.createComment("");
-    node._$h = id;
-    return node;
+    const hy = globalThis._$HY,
+      nodes = (hy.h && hy.h[id]) || (swapped && swapped.splice && swapped);
+    // (Claims drop the text separators: they are no part of the list.)
+    if (nodes)
+      for (let i = nodes.length, n; i--; )
+        ((n = nodes[i]).isConnected && n.nodeValue !== "!$") || nodes.splice(i, 1);
+    return nodes;
+  };
+  // The server marks the markup of such a boundary with `<!--ph-ID-->` and
+  // `<!--/ph-ID-->`: it is listed and the markers go before anything claims,
+  // so positions are the server's — in the document now, and in what each
+  // swap inserts before the swap is announced. An element with no key is
+  // markup the client never claims (`<NoHydration>`): it stays untracked, as
+  // it would without a wait.
+  const spans = roots => {
+    const open = {},
+      done = [],
+      visit = n => {
+        const m = /^(\/?)ph-(.+)/.exec(n.nodeValue);
+        let c = m && open[m[2]],
+          l;
+        if (!m) return;
+        if (!m[1]) open[m[2]] = n;
+        else if (c) {
+          done.push(c, n);
+          (hy.h ||= {})[m[2]] = l = [];
+          while ((c = c.nextSibling) && c !== n)
+            (c.nodeType !== 1 || c.hasAttribute("_hk") || /^pl-/.test(c.id)) && l.push(own(c));
+        }
+      };
+    for (const r of roots)
+      if (r.nodeType === 8) visit(r);
+      else for (let w = document.createTreeWalker(r, 128), n; (n = w.nextNode()); ) visit(n);
+    done.forEach(n => n.remove());
+  };
+  spans([document]);
+  const fe = hy.fe;
+  hy.fe = (id, parent) => {
+    const swapped = hy.v && hy.v[id];
+    swapped && swapped.splice && spans(swapped);
+    fe && fe(id, parent);
   };
   sharedConfig.fragmentRange = id => {
     const tpl = document.getElementById("pl-" + id);
@@ -3252,71 +3285,6 @@ function eventHandler(e, container, state) {
   delete e.currentTarget;
 }
 
-// A boundary's stand-in for server DOM its content has yet to claim
-// (`sharedConfig.holdPlace`), still out of the document. `_$h` is the
-// boundary's id.
-const isHeld = n => n && n._$h && !n.isConnected;
-
-// `value` with each stand-in replaced by the server nodes it holds the place
-// of. Those nodes are in `current` and nowhere in `value`: an element is a
-// boundary's when its hydration key starts with the boundary's id, and text
-// goes by place. An element with no key is the stream's (a script or a link),
-// or markup the client never claims (`<NoHydration>`): it stays untracked.
-function resolveHeld(value, current) {
-  // A stand-in becomes `[its id, ...its nodes]`.
-  const helds = [],
-    out = value.map(v => (isHeld(v) ? (helds.push((v = [v._$h])), v) : v)),
-    placed = new Set(value),
-    at = new Map(current.map((n, i) => [n, i]));
-  let ci = 0,
-    seen = 0,
-    gap;
-  const keyOf = n =>
-    n.nodeType !== 1 ? "" : n.getAttribute("_hk") || (/^pl-/.test(n.id) ? n.id.slice(3) : 0);
-  const named = key => key && helds.find(h => key.startsWith(h[0]));
-  const give = end => {
-    for (let last = gap, lead = [], n, key, owner; ci < end; ci++) {
-      n = current[ci];
-      key = keyOf(n);
-      if (key === 0 || !n.isConnected) continue;
-      // A node `value` places itself (a reorder) belongs to no stand-in.
-      if (placed.has(n)) {
-        last = 0;
-        lead = [];
-        continue;
-      }
-      // An element no stand-in names goes by place: the outcome an
-      // `<Errored>` drew where its boundary failed carries the Errored's key.
-      owner = named(key) || last;
-      owner ? owner.push(...lead.splice(0), n) : key ? (lead = []) : lead.push(n);
-      last = owner;
-    }
-    gap = 0;
-  };
-  out.forEach((v, i) => {
-    if (Array.isArray(v)) return (seen++, (gap ||= v));
-    let k = v.nodeType && at.get(v) >= ci ? at.get(v) : -1,
-      c;
-    // A primitive is the text node at its place; past a stand-in, the last
-    // one with its text that no later stand-in owns.
-    if (!v.nodeType)
-      for (
-        let j = ci;
-        (c = current[j]) && !placed.has(c) && helds.indexOf(named(keyOf(c))) < seen;
-        j++
-      ) {
-        if (c.nodeType === 3 && (!gap || c.data === "" + v)) k = j;
-        if (!gap) break;
-      }
-    if (k < 0) return v.nodeType || (out[i] = document.createTextNode(v));
-    give(k);
-    c = out[i] = current[ci++];
-    if (!v.nodeType && c.data !== "" + v) c.data = c._$d = v;
-  });
-  give(current.length);
-  return out.flatMap(v => (Array.isArray(v) ? v.slice(1) : v));
-}
-
 function insertExpression(parent, value, current, marker) {
   if ("_SOLID_DEV_") tagElement(parent);
   if (hydrationRt !== null && isHydrating(parent)) {
@@ -3331,13 +3299,8 @@ function insertExpression(parent, value, current, marker) {
     // residue. Claimed nodes are connected (or under a declared claim
     // root); phantom renders are neither, and keep `current` as-is.
     if (value && value !== current) {
-      const arr = Array.isArray(value),
-        items = arr ? value : [value];
-      if (items.some(isHeld)) {
-        const resolved = resolveHeld(items, [].concat(current ?? []));
-        return resolved.every(n => isHydrating(n)) ? resolved : current;
-      }
-      for (const n of items) {
+      const arr = Array.isArray(value);
+      for (const n of arr ? value : [value]) {
         if (n && n.nodeType) {
           if (!isHydrating(n)) return current;
           // Dev: a claimed element the parser moved out of `parent`.
@@ -3370,30 +3333,15 @@ function insertExpression(parent, value, current, marker) {
   // nodes, and reverses them when a sibling's `nextSibling` is the
   // boundary's first node. So the tracked nodes must all be among the items,
   // in the same order — a removal or a reorder still reconciles.
-  if (hydrationRt !== null && value && !sharedConfig.done) {
-    // A boundary's stand-in is the server nodes it holds the place of: in a
-    // resume window they are all where they belong, and in any other render
-    // they stay while the nodes around them change.
-    if (value._$h) value = [value];
-    if (Array.isArray(value) && value.some(isHeld)) {
-      current = [].concat(current ?? []);
-      value = resolveHeld(value, current);
-      if (
-        sharedConfig.hydrating &&
-        value.every(n => n.parentNode === parent) &&
-        current.every(n => !n.isConnected || value.includes(n))
-      )
-        return value;
-    } else if (sharedConfig.hydrating && value.length !== 0) {
-      const tracked = [].concat(current ?? []);
-      if (
-        []
-          .concat(value)
-          .every(n => (n === tracked[0] && tracked.shift(), n?.parentNode === parent)) &&
-        !tracked.length
-      )
-        return value;
-    }
+  if (hydrationRt !== null && sharedConfig.hydrating && value && value.length !== 0) {
+    const tracked = [].concat(current ?? []);
+    if (
+      []
+        .concat(value)
+        .every(n => (n === tracked[0] && tracked.shift(), n?.parentNode === parent)) &&
+      !tracked.length
+    )
+      return value;
   }
   const t = typeof value;
 
@@ -3544,8 +3492,6 @@ function normalize(value, current, multi, doNotUnwrap) {
       const item = value[i],
         prev = current && current[i],
         t = typeof item;
-      // (One stand-in is any number of nodes: positions past it are resolveHeld's.)
-      if (item && item._$h) break;
       if ((t === "string" || t === "number") && prev && prev.nodeType === 3 && isHydrating(prev))
         value[i] = prev;
     }

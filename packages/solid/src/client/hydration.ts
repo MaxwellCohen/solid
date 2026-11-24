@@ -3118,7 +3118,16 @@ function hydratedCreateLoadingBoundary<T, U>(
         shouldHydrate =>
           resumed ||
           (shouldHydrate
-            ? whenRevealed(id, () => resume(true))
+            ? whenRevealed(id, () => {
+                // A fragment can be the first to carry the boundary's
+                // module map (its content rendered after the shell
+                // flushed): load what it brought before claiming the
+                // revealed content. Resuming first renders nothing while
+                // the module loads, and that empty render clears the
+                // parent (#4087).
+                const assets = boundaryAssets(id);
+                assets ? waitAndResume(true, resume, assets) : resume(true);
+              })
             : // Rendered fresh. A rejected fragment swapped in over the
               // claimed fallback left its nodes — the server's outcome for
               // the failure, which `$dfr` lists in the reveal record
@@ -3152,7 +3161,8 @@ function hydratedCreateLoadingBoundary<T, U>(
           });
         }
       };
-      const off = subscribeFragments(swapped => swapped === id && hy.v?.[id] && again());
+      // (Only a swap that lists its nodes: there is nothing else to hold.)
+      const off = subscribeFragments(swapped => swapped === id && hy.v?.[id]?.splice && again());
       onCleanup(off);
       const range = sharedConfig.fragmentRange?.(id);
       // A collapsed slot's fallback is parked in its placeholder; the
