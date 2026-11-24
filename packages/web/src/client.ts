@@ -2613,13 +2613,8 @@ export function hydrate(code, element, options = {}) {
   sharedConfig.has = id => id in globalThis._$HY.r;
   sharedConfig.gather = root => gatherHydratable(element, root);
   sharedConfig.loadModuleAssets = loadModuleAssets;
-  // A streamed boundary's placeholder range: `tpl` (`<template id="pl-X">`)
-  // up to its `<!--pl-X-->`, or (a document stream) from the `<?start>`
-  // ahead of `tpl` to the `<?end>` that balances it — a range nested in the
-  // fallback is a sibling with its own pair.
-  // A marker is a processing instruction where the parser has them. The
-  // client reads it as the comment the inline runtime makes of it (`$dpi`):
-  // an owner would be left holding a node that is no longer in the document.
+  // A marker is read as the comment the inline runtime makes of a processing
+  // instruction (`$dpi`): an owner would otherwise hold a node it removes.
   const own = node => {
     if (node && node.nodeType === 7)
       node.replaceWith((node = document.createComment("?" + node.target)));
@@ -2658,7 +2653,8 @@ export function hydrate(code, element, options = {}) {
           done.push(c, n);
           (hy.h ||= {})[m[2]] = l = [];
           while ((c = c.nextSibling) && c !== n)
-            (c.nodeType !== 1 || c.hasAttribute("_hk") || /^pl-/.test(c.id)) && l.push(own(c));
+            (c.nodeType !== 1 || c.hasAttribute("_hk") || /^pl-/.test(c.id)) &&
+              l.push((c = own(c)));
         }
       };
     for (const r of roots)

@@ -220,6 +220,9 @@ describe("a boundary that cannot claim yet holds its place", () => {
       flush();
       expect(a.textContent).toBe("a:1");
       expect(page.hy.done).toBe(true);
+      // Claimed: no list keeps the server nodes.
+      expect(Object.values(page.hy.v ?? {}).filter((l: any) => l.splice)).toEqual([]);
+      expect(Object.keys(page.hy.h ?? {})).toEqual([]);
     })
   );
 
@@ -358,6 +361,28 @@ describe("a boundary that cannot claim yet holds its place", () => {
       expect(page.hy.done).toBe(true);
     })
   );
+
+  // A marker the parser left as a processing instruction (hydration ran
+  // ahead of the runtime's disarm pass) is listed as its comment, and what
+  // follows it in the span is listed too.
+  test("beside: a processing instruction inside the span", () =>
+    withPage("beside", async page => {
+      const { shell } = recording("beside");
+      const [markup, ...scripts] = steps(page.container, shell, true);
+      markup();
+      const a = page.container.querySelector("#a")!;
+      a.before(document.createProcessingInstruction("end", ""));
+      for (const run of scripts) run();
+      page.start();
+      await settle();
+      const list = Object.values(page.hy.h ?? {}).find((l: any) => l.includes(a)) as Node[];
+      expect(list.map(n => (n.nodeType === 8 ? n.nodeValue : (n as Element).id))).toEqual([
+        "?end",
+        "a"
+      ]);
+      page.land();
+      await settle();
+    }));
 
   everyStart("between", startAt =>
     withPage("between", async page => {

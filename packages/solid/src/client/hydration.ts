@@ -2936,6 +2936,12 @@ function hydratedCreateLoadingBoundary<T, U>(
 
   let settledSerializationResumeQueued = false;
   const hold = (id: string) => sharedConfig.holdPlace?.(id, (globalThis as any)._$HY.v?.[id]);
+  // A list keeps its nodes alive: it goes once the boundary claims, or with
+  // the boundary.
+  const drop = (id: string, hy = (globalThis as any)._$HY) => {
+    if (hy?.v?.[id]) hy.v[id] = 1;
+    if (hy?.h) delete hy.h[id];
+  };
   // The whole range, so a reorder moves it and a removal takes it.
   const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>
     range ? [range[0], range[2] ? undefined : fallback(), range[1]] : fallback();
@@ -2943,14 +2949,7 @@ function hydratedCreateLoadingBoundary<T, U>(
   return coreMemo(() => {
     const o = getOwner()!;
     const id = o.id!;
-    // A list keeps its nodes alive: it goes with the boundary.
-    onCleanup(() => {
-      const hy = (globalThis as any)._$HY;
-      if (isDisposed(o) && hy) {
-        if (hy.v?.[id]) hy.v[id] = 1;
-        if (hy.h) delete hy.h[id];
-      }
-    });
+    onCleanup(() => isDisposed(o) && drop(id));
 
     const assetPromise = sharedConfig.hydrating ? boundaryAssets(id) : undefined;
 
@@ -2980,6 +2979,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         // Hydrate straight through — the fallback only hydrates when it is
         // actually showing. Rendering it here would create phantom client DOM
         // and poison insert's node bookkeeping (#2801 bug 1).
+        drop(id);
         return coreLoadingBoundary(fn, fallback, options);
       }
       if (p) {
@@ -3049,6 +3049,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         // create phantom client DOM and poison insert's node bookkeeping
         // (#2801 bug 1).
         sharedConfig.gather?.(id);
+        drop(id);
         return coreLoadingBoundary(fn, fallback, options);
       }
 
@@ -3181,6 +3182,7 @@ function hydratedCreateLoadingBoundary<T, U>(
       );
       return hold(id);
     }
+    drop(id);
     return coreLoadingBoundary(fn, fallback, options);
   }) as unknown as Accessor<T | U>;
 }

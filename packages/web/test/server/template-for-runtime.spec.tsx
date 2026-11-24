@@ -31,7 +31,6 @@ describe("$df with templateFor ranges", () => {
     expect(fe).toHaveBeenCalledOnce();
     // the reveal record lists what the swap inserted
     expect([...(globalThis as any)._$HY.v.X]).toEqual([document.querySelector("b")]);
-    expect((globalThis as any)._$HY.v.X.e).toBe(false);
   });
 
   test("a nested swap keeps every node list that held its range current", () => {
@@ -52,7 +51,7 @@ describe("$df with templateFor ranges", () => {
     expect(outer.every((n: Node) => n.isConnected)).toBe(true);
   });
 
-  test("a rejected fragment's record is marked: its nodes are the server's outcome", () => {
+  test("a rejected fragment's record lists the server's outcome", () => {
     document.body.innerHTML =
       '<!--?start name="X"--><template id="pl-X"></template><i>wait</i><!--?end-->' +
       '<template id="X" for="X" e><p>failed</p></template>';
@@ -60,7 +59,6 @@ describe("$df with templateFor ranges", () => {
     (globalThis as any).$df("X");
     const record = (globalThis as any)._$HY.v.X;
     expect([...record]).toEqual([document.querySelector("p")]);
-    expect(record.e).toBe(true);
   });
 
   test("a range nested in the fallback does not close the outer one", () => {
@@ -108,7 +106,6 @@ describe("$df with templateFor ranges", () => {
     expect(fe).toHaveBeenCalledWith("X", document.body);
     // the reveal record lists what the swap inserted
     expect([...(globalThis as any)._$HY.v.X]).toEqual([document.querySelector("b")]);
-    expect((globalThis as any)._$HY.v.X.e).toBe(false);
   });
 
   test("a nested range is blanked before its content joins the document", () => {
