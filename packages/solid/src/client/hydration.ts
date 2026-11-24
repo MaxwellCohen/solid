@@ -2384,10 +2384,6 @@ function resumeBoundaryHydration(
 ) {
   // Read before release(): releasing removes the boundaryScopes entry.
   const scope = sharedConfig.boundaryScopes?.get(id);
-  // A fresh render replaces the server markup of every boundary under this
-  // one: their span lists would only keep it alive.
-  const hs = (globalThis as any)._$HY?.hs;
-  if (!shouldHydrate && hs) for (const k in hs) k.startsWith(id) && delete hs[k];
   // Disposal already released this boundary's pending count (#2917).
   if (!release()) return;
   if (isDisposed(o)) {
@@ -2422,6 +2418,16 @@ function resumeBoundaryHydration(
       // the registry) computes.
       servedPass(set, shouldHydrate === 0 && o)();
   flush();
+  // A fresh render took out the server markup of the boundaries under this
+  // one, which never hydrate to drop their lists: a list left with no node
+  // in the document only keeps them alive.
+  if (!shouldHydrate) {
+    const hy = (globalThis as any)._$HY;
+    for (const m of [hy?.v, hy?.hs])
+      for (const k in m)
+        m[k].some?.((n: Node) => n.isConnected) === false &&
+          (m === hy.v ? (m[k] = 1) : delete m[k]);
+  }
   checkHydrationComplete();
 }
 

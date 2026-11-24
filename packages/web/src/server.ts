@@ -2566,8 +2566,7 @@ export function renderToStream(code, options = {}) {
       waitingOn.delete(key);
       const deferActivation = !!meta.revealGroup;
       const styles = meta.styles;
-      // A rejected fragment's template is marked `e` (#4287). The runtime
-      // lists every swap now, so the client reads the mark no longer.
+      // A rejected fragment's template is marked `e` (#4287).
       const tpl = `<template id="${key}"${meta.error ? " e" : ""}>${value}</template>`;
       for (let i = 0; i < styles.inline.length; i++) {
         buffer.write(renderInlineStyle(styles.inline[i], nonce));
