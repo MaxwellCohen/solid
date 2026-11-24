@@ -180,6 +180,30 @@ describe("$df with templateFor ranges", () => {
     expect(kids.every(k => k.namespaceURI === SVG)).toBe(true);
   });
 
+  test("SVG placeholder: where Trusted Types block the reparse, the content still goes in", () => {
+    document.body.innerHTML =
+      '<svg id="t"><template id="pl-T"></template><!--pl-T--></svg>' +
+      '<template id="T"><circle r="2"></circle></template>';
+    const fe = boot();
+    const create = document.createElementNS;
+    document.createElementNS = function (this: Document, ns: string, name: string) {
+      const el = create.call(this, ns, name);
+      Object.defineProperty(el, "innerHTML", {
+        set() {
+          throw new TypeError("This document requires 'TrustedHTML' assignment.");
+        }
+      });
+      return el;
+    } as typeof document.createElementNS;
+    try {
+      expect((globalThis as any).$df("T")).toBe(1);
+    } finally {
+      document.createElementNS = create;
+    }
+    expect([...document.getElementById("t")!.children].map(k => k.localName)).toEqual(["circle"]);
+    expect(fe).toHaveBeenCalledWith("T", document.getElementById("t"));
+  });
+
   test("SVG placeholder: an <image> the HTML parser read as <img> is an SVG image", () => {
     document.body.innerHTML =
       '<svg id="i"><template id="pl-I"></template><!--pl-I--></svg>' +

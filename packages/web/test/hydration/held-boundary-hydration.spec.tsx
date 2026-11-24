@@ -10,6 +10,8 @@
  *   boundary claims them when its module lands;
  * - `hide`: a `<Show>` that hides the boundary takes them out;
  * - `reorder`: a reorder moves the boundary, which then renders fresh;
+ * - `reorder-claimed`: a reorder that puts claimed rows ahead of a waiting
+ *   one leaves each row its own nodes;
  * - `pending`, `pending-text`: a reorder moves a pending boundary with its
  *   whole placeholder range, and each fragment lands at its row;
  * - `collapsed`: the fallback the inline runtime shows for the next slot of
@@ -215,6 +217,8 @@ describe("a boundary that cannot claim yet holds its place", () => {
       flush();
       expect(a.textContent).toBe("a:1");
       expect(page.hy.done).toBe(true);
+      // The swap's node list is let go once every boundary has claimed.
+      expect(Object.values(page.hy.v)).toEqual([1]);
     })
   );
 
@@ -260,6 +264,23 @@ describe("a boundary that cannot claim yet holds its place", () => {
         expect(page.hy.done).toBe(true);
       })
     );
+
+  everyStart("reorder-claimed", startAt =>
+    withPage("reorder-claimed", async page => {
+      await replay(page, "reorder-claimed", startAt, 0, page.app.reverse);
+      expect(ids(page.main())).toEqual(["c", "b", "a"]);
+      page.land();
+      await settle();
+      expect(ids(page.main())).toEqual(["c", "b", "a"]);
+      expect(page.main().textContent).toBe("c:0b:0a:0");
+      const [c, b] = [...page.main().querySelectorAll("b")] as any[];
+      expect(c.$server && b.$server).toBe(true);
+      b.click();
+      flush();
+      expect(b.textContent).toBe("b:1");
+      expect(page.hy.done).toBe(true);
+    })
+  );
 
   // A fragment that lands after the reorder is claimed where it landed.
   test("pending: fragments that follow the reorder are claimed in place", () =>

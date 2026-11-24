@@ -1764,9 +1764,11 @@ function isAttrName(prop: string): boolean {
 //   elements there); HTML integration points keep the HTML-parsed content.
 //   The HTML parser reads `<image>` as `<img>`: each one is named `image`
 //   again before the reparse, which keeps `<img>` wherever HTML content is.
+//   Where Trusted Types block the `innerHTML` write, the content goes in as
+//   the template parsed it.
 // - $dfg(id): group-style gate check; reveals a waiting group once all style counts hit zero.
 // - $dfj(ids): reveal a group in registration order, waiting if any member still has pending styles.
-const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dfx(o,e,d){for(d=0;o=o.nextSibling;)if(8==o.nodeType&&o.nodeValue=="pl-"+e||($dfm(o,"start")?!++d:$dfm(o,"end")&&!d--))break;return o}function $dpi(r,t,w,a){for(w=document.createTreeWalker(r,64),a=[];t=w.nextNode();)/^(start|end)$/.test(t.target)&&a.push(t);for(t of a)t.replaceWith(document.createComment("?"+t.target))}function $dfn(t,n,c,f,a){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;for(f of n.content.querySelectorAll("img")){c=document.createElement("image");for(a of f.attributes)c.setAttribute(a.name,a.value);f.replaceWith(c)}c=document.createElementNS(t.namespaceURI,t.localName);c.innerHTML=n.innerHTML;f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(c=$dfx(o,e);o!=c;)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),((_$HY.v=_$HY.v||{})[e]=[...c.childNodes]).e=n.hasAttribute("e"),o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;if(n=$dfx(o,e)){o.parentNode&&((t=document.createDocumentFragment()).append(...(o.content||o).cloneNode(!0).childNodes),$dpi(t),o.parentNode.insertBefore(t,n)),o._$fl=1,(t=document.querySelector('template[for="'+e+'"]:not([id])'))&&t.remove(),(t=_$HY.fl)&&t[e]&&t[e](),$dfd();return 1}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
+const REPLACE_SCRIPT = `function $df(e){return _$HY.f?_$HY.f(e):$dfr(e)}function $dfm(n,k){return n&&(7==n.nodeType?n.target==k:8==n.nodeType&&!n.nodeValue.indexOf("?"+k))}function $dfx(o,e,d){for(d=0;o=o.nextSibling;)if(8==o.nodeType&&o.nodeValue=="pl-"+e||($dfm(o,"start")?!++d:$dfm(o,"end")&&!d--))break;return o}function $dpi(r,t,w,a){for(w=document.createTreeWalker(r,64),a=[];t=w.nextNode();)/^(start|end)$/.test(t.target)&&a.push(t);for(t of a)t.replaceWith(document.createComment("?"+t.target))}function $dfn(t,n,c,f,a){if(t.namespaceURI==="http://www.w3.org/1999/xhtml"||/^(foreignObject|desc|title|annotation-xml|mi|mo|mn|ms|mtext)$/.test(t.localName))return n.content;for(f of n.content.querySelectorAll("img")){c=document.createElement("image");for(a of f.attributes)c.setAttribute(a.name,a.value);f.replaceWith(c)}c=document.createElementNS(t.namespaceURI,t.localName);try{c.innerHTML=n.innerHTML}catch(a){return n.content}f=document.createDocumentFragment();f.append(...c.childNodes);return f}function $dfr(e,n,o,t,p,c){if(!(n=document.getElementById(e)))return!document.getElementById("pl-"+e)&&!(_$HY.v&&_$HY.v[e])&&((_$HY.v=_$HY.v||{})[e]=1,_$HY.fe(e),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd(),1)||0;if(!(o=document.getElementById("pl-"+e)))return(_$HY.dq=_$HY.dq||{})[e]=1,0;p=o.previousSibling;for(c=$dfx(o,e);o!=c;)t=o.nextSibling,o.remove(),o=t;$dfm(p,"start")&&p.remove();t=o.parentNode,c=$dfn(t,n),$dpi(c),((_$HY.v=_$HY.v||{})[e]=[...c.childNodes]).e=n.hasAttribute("e"),o.replaceWith(c),n.remove(),_$HY.fe(e,t),_$HY.hp&&_$HY.hp[e]&&($dh(_$HY.hp[e]),delete _$HY.hp[e]),$dfd();return 1}function $dfl(e,o,n,t){if(!(o=document.getElementById("pl-"+e)))return(_$HY.dlq=_$HY.dlq||{})[e]=1,0;if(o._$fl)return 1;if(n=$dfx(o,e)){o.parentNode&&((t=document.createDocumentFragment()).append(...(o.content||o).cloneNode(!0).childNodes),$dpi(t),o.parentNode.insertBefore(t,n)),o._$fl=1,(t=document.querySelector('template[for="'+e+'"]:not([id])'))&&t.remove(),(t=_$HY.fl)&&t[e]&&t[e](),$dfd();return 1}return 0}function $dflj(e,i){for(i=0;i<e.length;i++)$dfl(e[i])}function $dfd(e,i){if(e=_$HY.dq){_$HY.dq=0;for(i in e)$df(i)}if(e=_$HY.dlq){_$HY.dlq=0;for(i in e)$dfl(i)}}function $dfs(e,c,d){(_$HY.sc=_$HY.sc||{})[e]=c,d&&((_$HY.sd=_$HY.sd||{})[e]=1)}function $dfg(e,g,i,k){if(!(g=_$HY.sg&&_$HY.sg[e]))return;for(i=0;i<g.length;i++)if(_$HY.sc&&_$HY.sc[g[i]]>0)return;for(i=0;i<g.length;i++)k=g[i],delete _$HY.sg[k],$df(k)}function $dfc(e){if(--_$HY.sc[e]<=0){delete _$HY.sc[e],_$HY.sg&&_$HY.sg[e]?$dfg(e):!(_$HY.sd&&_$HY.sd[e])&&$df(e);_$HY.sd&&delete _$HY.sd[e]}}function $dfj(e,i,n){for(i=0;i<e.length;i++)if(_$HY.sc&&_$HY.sc[e[i]]>0){for(n=0;n<e.length;n++)(_$HY.sg=_$HY.sg||{})[e[n]]=e;return}for(i=0;i<e.length;i++)$df(e[i])}function $dfe(e,t,k){(t=e.target)&&t.getAttribute&&!t._$dc&&(k=t.getAttribute("data-dfc"))&&(t._$dc=1,$dfc(k))}document.addEventListener("load",$dfe,!0);document.addEventListener("error",$dfe,!0);$dpi(document)`;
 
 // Head patch runtime, emitted once alongside the first head-patch task:
 // - $dha(ops): apply patch ops to document.head — "t" sets the title (and
@@ -6515,21 +6517,39 @@ function replacePlaceholder(html, key, value) {
   const marker = `<template id="pl-${key}">`;
   const first = html.indexOf(marker);
   if (first === -1) return html;
-  let at = first + marker.length;
+  const at = first + marker.length;
   // A `templateFor` scaffold is a patching range: it closes at the `<?end>`
   // that balances its `<?start>`, past any range nested in the fallback.
   const start = `<?start name="${key}">`;
   if (html.startsWith(start, first - start.length)) {
-    for (let depth = 0; ; at += 6) {
-      const end = html.indexOf("<?end>", at);
-      if (end === -1) return html;
-      for (let s = at; (s = html.indexOf("<?start ", s)) !== -1 && s < end; s += 8) depth++;
-      at = end;
-      if (!depth--) return html.slice(0, first - start.length) + value + html.slice(end + 6);
-    }
+    const end = rangeClose(html, at);
+    return end === -1 ? html : html.slice(0, first - start.length) + value + html.slice(end + 6);
   }
   const close = `<!--pl-${key}-->`;
   return html.slice(0, first) + value + html.slice(html.indexOf(close, at) + close.length);
+}
+
+// Where the patching range whose content starts at `at` closes: the index of
+// the `<?end>` that balances it, or -1. A marker counts only where the parser
+// reads one: an attribute value can hold the same characters as text, and so
+// can the text of a raw-text element.
+// (The same scan as rangeClose in solid-js's server.)
+const TAG = /<([a-zA-Z][^\s/>]*)(?:[^>"']|"[^"]*"|'[^']*')*>/y;
+function rangeClose(html, at) {
+  for (let depth = 0, i = at, m; (i = html.indexOf("<", i)) !== -1; ) {
+    if (html.startsWith("<?end>", i)) {
+      if (!depth--) return i;
+      i += 6;
+    } else if (html.startsWith("<?start ", i)) {
+      depth++;
+      i += 8;
+    } else if (((TAG.lastIndex = i), (m = TAG.exec(html)))) {
+      i = TAG.lastIndex;
+      if (/^(script|style|textarea|title)$/i.test(m[1]))
+        i = Math.max(i, html.indexOf("</" + m[1], i));
+    } else i++;
+  }
+  return -1;
 }
 
 function classListToObject(classList) {

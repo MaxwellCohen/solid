@@ -20,6 +20,7 @@ export const SHAPES = [
   "nested",
   "hide",
   "reorder",
+  "reorder-claimed",
   "pending",
   "pending-text",
   "collapsed",
@@ -136,6 +137,22 @@ export function createHeldApp(shape: Shape) {
                 <LateBox>
                   <Item name={k} />
                 </LateBox>
+              )}
+            </Loading>
+          )}
+        </For>
+      ) : shape === "reorder-claimed" ? (
+        // Only `a` waits on the module: `b` and `c` have claimed when the
+        // list reverses.
+        <For each={order()}>
+          {k => (
+            <Loading fallback={<i>{k}</i>}>
+              {k === "a" ? (
+                <LateBox>
+                  <Item name={k} />
+                </LateBox>
+              ) : (
+                <Item name={k} />
               )}
             </Loading>
           )}

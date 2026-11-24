@@ -448,7 +448,13 @@ function drainHydrationCallbacks() {
   if (cbs) for (const cb of cbs) cb();
   setTimeout(() => {
     if (IS_DEV && sharedConfig.verifyHydration) sharedConfig.verifyHydration();
-    if ((globalThis as any)._$HY) (globalThis as any)._$HY.done = true;
+    const hy = (globalThis as any)._$HY;
+    if (hy) {
+      hy.done = true;
+      // Every boundary has claimed: the swaps' node lists keep nodes alive
+      // that the page may since have dropped.
+      for (const id in hy.v) hy.v[id] = 1;
+    }
     sharedConfig.registry?.clear();
   });
 }

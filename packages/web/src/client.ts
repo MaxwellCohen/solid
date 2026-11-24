@@ -3282,6 +3282,12 @@ function resolveHeld(value, current) {
       n = current[ci];
       key = keyOf(n);
       if (key === 0 || !n.isConnected) continue;
+      // A node `value` places later (a reorder) belongs to no stand-in.
+      if (value.includes(n)) {
+        last = 0;
+        lead = [];
+        continue;
+      }
       // By key, or by place: text, and an element none of them names (the
       // outcome an `<Errored>` drew where its boundary failed).
       owner = named(key) || last;
@@ -3365,7 +3371,7 @@ function insertExpression(parent, value, current, marker) {
   // nodes, and reverses them when a sibling's `nextSibling` is the
   // boundary's first node. So the tracked nodes must all be among the items,
   // in the same order — a removal or a reorder still reconciles.
-  if (hydrationRt !== null && value) {
+  if (hydrationRt !== null && value && !sharedConfig.done) {
     // A boundary's stand-in is the server nodes it holds the place of: in a
     // resume window they are all where they belong, and in any other render
     // they stay while the nodes around them change.

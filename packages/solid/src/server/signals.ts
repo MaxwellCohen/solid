@@ -4194,19 +4194,33 @@ function record(
   return wire;
 }
 
+// Where the patching range whose content starts at `at` closes: the index of
+// the `<?end>` that balances it, or -1. A marker counts only where the parser
+// reads one: an attribute value can hold the same characters as text, and so
+// can the text of a raw-text element.
+// (The same scan as rangeClose in @solidjs/web's server.)
+const TAG = /<([a-zA-Z][^\s/>]*)(?:[^>"']|"[^"]*"|'[^']*')*>/y;
+function rangeClose(html: string, at: number): number {
+  for (let depth = 0, i = at, m; (i = html.indexOf("<", i)) !== -1; ) {
+    if (html.startsWith("<?end>", i)) {
+      if (!depth--) return i;
+      i += 6;
+    } else if (html.startsWith("<?start ", i)) {
+      depth++;
+      i += 8;
+    } else if (((TAG.lastIndex = i), (m = TAG.exec(html)))) {
+      i = TAG.lastIndex;
+      if (/^(script|style|textarea|title)$/i.test(m[1]))
+        i = Math.max(i, html.indexOf("</" + m[1], i));
+    } else i++;
+  }
+  return -1;
+}
+
 // Whether `t`, which opens a patching range, is that range and nothing
 // after it: the `<?end>` that balances its `<?start>` is the last thing in it.
 function isOneRange(t: string): boolean {
-  for (let at = 0, depth = 0; ; ) {
-    const end = t.indexOf("<?end>", at);
-    const start = t.indexOf("<?start ", at);
-    if (end < 0) return false;
-    if (start >= 0 && start < end) {
-      depth++;
-      at = start + 8;
-    } else if (--depth) at = end + 6;
-    else return end === t.length - 6;
-  }
+  return rangeClose(t, t.indexOf(">") + 1) === t.length - 6;
 }
 
 export function createErrorBoundary<T, U>(

@@ -8,9 +8,19 @@ import { expect, test } from "vitest";
 import { createHeldApp, manifest, SHAPES } from "../harness/held-boundary-hydration.jsx";
 import { recordStream, writeArtifact } from "./artifact-recorder.js";
 
-const LAZY = ["nested", "hide", "reorder", "cut", "beside", "between", "root", "preload-retry"];
+const LAZY = [
+  "nested",
+  "hide",
+  "reorder",
+  "reorder-claimed",
+  "cut",
+  "beside",
+  "between",
+  "root",
+  "preload-retry"
+];
 // settled in the shell: nothing streams
-const SHELL = ["reorder", "beside", "root"];
+const SHELL = ["reorder", "reorder-claimed", "beside", "root"];
 
 for (const shape of SHAPES) {
   test(`render held-boundary-hydration (${shape}) chunks`, async () => {

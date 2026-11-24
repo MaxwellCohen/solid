@@ -319,9 +319,8 @@ export type RevealProps = {
  * Coordinates the reveal timing of sibling `<Loading>` boundaries during SSR.
  *
  * The `order` prop picks the reveal policy:
- * - `"sequential"` (default) — boundaries reveal in streamed order; out-of-order
- *   resolutions have their fragment HTML streamed into templates as data arrives,
- *   but the swap from fallback to content waits until the frontier reaches them.
+ * - `"sequential"` (default) — boundaries reveal in streamed order; the swap from
+ *   fallback to content waits until the frontier reaches them.
  * - `"together"` — every direct slot holds its fallback until the whole group is
  *   "minimally ready" (every direct slot has its own first visible content
  *   available), then the whole group releases in a single activation.
@@ -334,10 +333,13 @@ export type RevealProps = {
  * it is ignored under `"together"` and `"natural"`.
  *
  * Nesting: a nested `<Reveal>` is held on its fallbacks until its parent releases
- * the slot it occupies. HTML for resolved fragments still streams through normally;
- * only the `revealFragments` swap calls are deferred. Once released, the inner
- * group runs its own `order` locally over whatever is still pending. There is no
- * escape hatch.
+ * the slot it occupies. Once released, the inner group runs its own `order`
+ * locally over whatever is still pending. There is no escape hatch.
+ *
+ * Streaming: a document stream (`renderToStream` without `options.sink`) holds a
+ * resolved fragment's HTML until its group releases it, so a browser that
+ * patches `<template for>` itself shows the group's order with scripts off. A
+ * frame stream sends the HTML as its data arrives and defers only the swap.
  *
  * Engine support:
  * - `renderToString` fully supports `order="sequential"` (without `collapsed`) and

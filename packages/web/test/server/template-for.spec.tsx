@@ -121,6 +121,40 @@ describe("templateFor", () => {
     expect(beside).not.toContain("caught");
   });
 
+  test("a marker in an attribute value or a raw-text element does not close a range", async () => {
+    const text = "<?end><u>LEAK</u>";
+    const Quick = () => {
+      const v = createMemo(() => Promise.resolve("quick"));
+      return <b>{v()}</b>;
+    };
+    // Settled before the shell is out: the server takes the scaffold out.
+    const inlined = await render(() => (
+      <Loading
+        fallback={
+          <i title={text}>
+            <style>{"i::after{content:'<?end>'}"}</style>wait
+          </i>
+        }
+      >
+        <Quick />
+      </Loading>
+    ));
+    expect(inlined).toContain("quick");
+    expect(inlined).not.toContain("LEAK");
+    expect(inlined).not.toContain("<?end>");
+    const caught = await render(
+      () => (
+        <Errored fallback={<p>caught</p>}>
+          <Loading fallback={<i title={text}>a</i>}>
+            <Reject />
+          </Loading>
+        </Errored>
+      ),
+      { onError() {} }
+    );
+    expect(caught).toMatch(/<template id="([^"]+)" for="\1" e><p[^>]*>caught<\/p><\/template>/);
+  });
+
   test("a boundary in a held fragment's fallback is released with its group, not behind the content", async () => {
     // Its placeholder is in the document (the fallback), not in the held
     // content, though it shares the held fragment's id prefix.
