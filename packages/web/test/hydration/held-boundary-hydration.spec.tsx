@@ -9,7 +9,8 @@
  * - `nested`: an enclosing boundary's resume leaves them alone, and the
  *   boundary claims them when its module lands;
  * - `hide`: a `<Show>` that hides the boundary takes them out;
- * - `reorder`: a reorder moves the boundary, which then renders fresh;
+ * - `reorder`: a reorder moves the boundary with its server markup, which
+ *   it then claims;
  * - `no-hydration`: markup the client never claims stays when the waiting
  *   boundary resumes;
  * - `reorder-claimed`: a reorder that puts claimed rows ahead of a waiting
@@ -244,6 +245,7 @@ describe("a boundary that cannot claim yet holds its place", () => {
       await settle();
       expect(ids(page.main())).toEqual(["c", "b", "a"]);
       expect(page.main().textContent).toBe("c:0b:0a:0");
+      expect([...page.main().querySelectorAll("b")].every(b => (b as any).$server)).toBe(true);
       const b = page.container.querySelector("#b") as HTMLElement;
       b.click();
       flush();

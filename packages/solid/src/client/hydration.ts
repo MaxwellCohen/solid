@@ -451,9 +451,10 @@ function drainHydrationCallbacks() {
     const hy = (globalThis as any)._$HY;
     if (hy) {
       hy.done = true;
-      // Every boundary has claimed: the swaps' node lists keep nodes alive
-      // that the page may since have dropped.
+      // Every boundary has claimed: the node lists keep nodes alive that the
+      // page may since have dropped.
       for (const id in hy.v) hy.v[id] = 1;
+      hy.h = undefined;
     }
     sharedConfig.registry?.clear();
   });
