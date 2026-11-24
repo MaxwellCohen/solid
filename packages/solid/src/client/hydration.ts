@@ -2384,6 +2384,10 @@ function resumeBoundaryHydration(
 ) {
   // Read before release(): releasing removes the boundaryScopes entry.
   const scope = sharedConfig.boundaryScopes?.get(id);
+  // A fresh render replaces the server markup of every boundary under this
+  // one: their span lists would only keep it alive.
+  const hs = (globalThis as any)._$HY?.hs;
+  if (!shouldHydrate && hs) for (const k in hs) k.startsWith(id) && delete hs[k];
   // Disposal already released this boundary's pending count (#2917).
   if (!release()) return;
   if (isDisposed(o)) {
@@ -2940,7 +2944,7 @@ function hydratedCreateLoadingBoundary<T, U>(
   // the boundary.
   const drop = (id: string, hy = (globalThis as any)._$HY) => {
     if (hy?.v?.[id]) hy.v[id] = 1;
-    if (hy?.h) delete hy.h[id];
+    if (hy?.hs) delete hy.hs[id];
   };
   // The whole range, so a reorder moves it and a removal takes it.
   const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>

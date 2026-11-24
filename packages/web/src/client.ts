@@ -2631,7 +2631,7 @@ export function hydrate(code, element, options = {}) {
   // (`$dfz`). Claims drop the text separators.
   sharedConfig.holdPlace = (id, swapped) => {
     const hy = globalThis._$HY,
-      nodes = (hy.h && hy.h[id]) || (swapped && swapped.splice && swapped);
+      nodes = (hy.hs && hy.hs[id]) || (swapped && swapped.splice && swapped);
     if (nodes)
       for (let i = nodes.length, n; i--; )
         ((n = nodes[i]).isConnected && n.nodeValue !== "!$") || nodes.splice(i, 1);
@@ -2651,7 +2651,7 @@ export function hydrate(code, element, options = {}) {
         if (!m[1]) open[m[2]] = n;
         else if (c) {
           done.push(c, n);
-          (hy.h ||= {})[m[2]] = l = [];
+          (hy.hs ||= {})[m[2]] = l = [];
           while ((c = c.nextSibling) && c !== n)
             (c.nodeType !== 1 || c.hasAttribute("_hk") || /^pl-/.test(c.id)) &&
               l.push((c = own(c)));

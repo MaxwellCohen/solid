@@ -43,11 +43,11 @@ describe("$df with templateFor ranges", () => {
     const hy = (globalThis as any)._$HY;
     (globalThis as any).$df("O");
     const outer = hy.v.O;
-    hy.h = { S: [...outer] };
+    hy.hs = { S: [...outer] };
     (globalThis as any).$df("I");
     const names = (l: Node[]) => l.map(n => n.textContent);
     expect(names(outer)).toEqual(["outer", "inner", "tail"]);
-    expect(names(hy.h.S)).toEqual(["outer", "inner", "tail"]);
+    expect(names(hy.hs.S)).toEqual(["outer", "inner", "tail"]);
     expect(outer.every((n: Node) => n.isConnected)).toBe(true);
   });
 

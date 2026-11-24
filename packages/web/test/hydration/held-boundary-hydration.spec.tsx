@@ -222,7 +222,7 @@ describe("a boundary that cannot claim yet holds its place", () => {
       expect(page.hy.done).toBe(true);
       // Claimed: no list keeps the server nodes.
       expect(Object.values(page.hy.v ?? {}).filter((l: any) => l.splice)).toEqual([]);
-      expect(Object.keys(page.hy.h ?? {})).toEqual([]);
+      expect(Object.keys(page.hy.hs ?? {})).toEqual([]);
     })
   );
 
@@ -234,6 +234,7 @@ describe("a boundary that cannot claim yet holds its place", () => {
       expect(scaffolding(page.main())).toBe(0);
       // The hidden boundary's node list goes with it.
       expect(Object.values(page.hy.v ?? {}).filter((l: any) => l.splice)).toEqual([]);
+      expect(Object.keys(page.hy.hs ?? {})).toEqual([]);
       page.land();
       await settle();
       expect(page.main().textContent).toBe("z:0");
@@ -375,13 +376,16 @@ describe("a boundary that cannot claim yet holds its place", () => {
       for (const run of scripts) run();
       page.start();
       await settle();
-      const list = Object.values(page.hy.h ?? {}).find((l: any) => l.includes(a)) as Node[];
+      const list = Object.values(page.hy.hs ?? {}).find((l: any) => l.includes(a)) as Node[];
       expect(list.map(n => (n.nodeType === 8 ? n.nodeValue : (n as Element).id))).toEqual([
         "?end",
         "a"
       ]);
       page.land();
       await settle();
+      expect(page.container.querySelector("#a")).toBe(a);
+      expect((a as any).$server).toBe(true);
+      expect(Object.keys(page.hy.hs ?? {})).toEqual([]);
     }));
 
   everyStart("between", startAt =>
