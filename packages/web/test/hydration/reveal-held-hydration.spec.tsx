@@ -77,6 +77,10 @@ describe("held reveal fragments hydrate in place", () => {
             for (const run of steps(container, chunk, i === 0)) {
               run();
               if (++step === startAt) dispose = hydrate(() => <App />, container);
+              // A `together` group shows all of its content or none, at every
+              // step: a swap does not wait for the settlement that follows it.
+              if (order === "together")
+                expect([0, 3]).toContain(container.querySelectorAll("main > b").length);
             }
             await settle();
           }

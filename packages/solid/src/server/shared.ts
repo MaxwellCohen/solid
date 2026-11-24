@@ -158,7 +158,7 @@ export type HydrationContext = {
   _loadingPhase?: boolean;
   /** True only in renderToStream — enables async data serialization and streaming. */
   async?: boolean;
-  /** Streaming placeholders are declarative-patching ranges (`renderToStream({ templateFor })`). */
+  /** Streaming placeholders are declarative-patching ranges (a document stream, not a sink's). */
   templateFor?: boolean;
   /**
    * Frame renders only (DR-2 case 1, set by the frame sink): signal that an

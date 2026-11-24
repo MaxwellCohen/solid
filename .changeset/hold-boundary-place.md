@@ -1,0 +1,6 @@
+---
+"solid-js": patch
+"@solidjs/web": patch
+---
+
+A hydrating `<Loading>` boundary that cannot claim its server markup yet (its `lazy()` module is still loading, or its fragment has not settled) keeps its place on the page. An enclosing boundary that resumes no longer removes that markup, a `<Show>` that hides the boundary takes it out, and a reorder moves a pending boundary with its whole placeholder range. A boundary resumes when its fragment is swapped in, not when the settlement after it arrives, so a `<Reveal>` group the server released together shows together.

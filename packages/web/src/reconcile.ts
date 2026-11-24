@@ -47,17 +47,6 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
   // belongs only to the slot whose marker matches. `a[]` can name a node that
   // user code moved out of this parent (or into another slot of it); every
   // anchor read and destructive op below checks before touching one.
-  // A streamed boundary still waiting on its fragment shows a fallback that
-  // sits inside its patching range, behind the range's start marker and
-  // placeholder template; hydration tags the fallback's first node with that
-  // start (`_$rs`). Content that belongs before the boundary goes before the
-  // whole range: inserted right before the fallback node, it would land
-  // inside the range, and the fragment's swap would take it out with the
-  // fallback.
-  const rangeAnchor = n => {
-    const start = n && n._$rs;
-    return start && start.parentNode === parentNode ? start : n;
-  };
   const isLive = n => n && n.parentNode === parentNode && (!(n = n[$$SLOT]) || n === slot);
   // Anchor on the first suffix node still ours (user code can move one
   // away), else `after`. Not on the last placed node's successor: that
@@ -65,11 +54,7 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
   const ref = k => {
     while (k < bLength && !isLive(b[k])) k++;
     // `after` can be a list node user code moved past the tail, which this pass has taken out.
-    return b[k]
-      ? rangeAnchor(b[k])
-      : after && after.parentNode !== parentNode
-        ? marker || null
-        : after;
+    return b[k] || (after && after.parentNode !== parentNode ? marker || null : after);
   };
   // If `a`'s tail has migrated to another slot — same parent or otherwise —
   // its `nextSibling` points into a region we don't own, so fall back to
@@ -154,8 +139,7 @@ export default function reconcileArrays(parentNode: any, a: any[], b: any[], mar
           while (++i < aEnd && i < bEnd && a[i] === b[index + sequence]) sequence++;
 
           if (sequence > index - bStart) {
-            const node = rangeAnchor(anchor);
-            while (bStart < index) insert(b[bStart++], node);
+            while (bStart < index) insert(b[bStart++], anchor);
           } else {
             // `replaceChild` detaches the old node, which is placed again
             // later in this pass. With `moveBefore()`, insert instead and

@@ -143,6 +143,23 @@ describe("$df with templateFor ranges", () => {
     expect(kids.every(k => k.namespaceURI === SVG)).toBe(true);
   });
 
+  test("SVG placeholder: an <image> the HTML parser read as <img> is an SVG image", () => {
+    document.body.innerHTML =
+      '<svg id="i"><template id="pl-I"></template><!--pl-I--></svg>' +
+      '<template id="I"><image href="a.png" width="3"></image>' +
+      '<foreignObject><img src="b.png"></foreignObject></template>';
+    boot();
+    (globalThis as any).$df("I");
+    const [image, foreign] = [...document.getElementById("i")!.children];
+    expect(image.localName).toBe("image");
+    expect(image.namespaceURI).toBe(SVG);
+    expect(image.getAttribute("href")).toBe("a.png");
+    // HTML content of the fragment keeps its <img>
+    const img = foreign.firstElementChild!;
+    expect(img.localName).toBe("img");
+    expect(img.namespaceURI).toBe("http://www.w3.org/1999/xhtml");
+  });
+
   test("MathML placeholder: content is reparsed into the MathML namespace", () => {
     document.body.innerHTML =
       '<math id="m"><template id="pl-M"></template><!--pl-M--></math>' +

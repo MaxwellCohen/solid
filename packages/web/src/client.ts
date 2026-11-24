@@ -1678,13 +1678,9 @@ export function installHydrationRuntime() {
 
 // Drop the `<!--!$-->` text-hole separators the server emits so adjacent
 // text nodes stay individually claimable; the array is compacted in place.
-// A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
-// its `<!--pl-X-->` end marker — is excluded from the claim array but KEPT in
-// the DOM (the $df swap still needs it). While the boundary is pending its
-// fallback hydrates into the region between the two; counting the scaffolding
-// shifted every positional text claim, so the fallback's reactive text never
-// adopted the server node and updates appended beside it as permanent debris
-// (solidjs/solid#2936).
+// A pending boundary's placeholder scaffolding stays in the claim array: the
+// boundary renders it around its fallback (`sharedConfig.fragmentRange`), so
+// positions line up and the scaffold moves and leaves with the boundary.
 function stripTextSeparators(nodes) {
   let j = 0;
   for (let i = 0; i < nodes.length; i++) {
@@ -1694,7 +1690,6 @@ function stripTextSeparators(nodes) {
       node.remove();
       continue;
     }
-    if (isPlaceholderScaffolding(node, t)) continue;
     nodes[j++] = node;
   }
   nodes.length = j;
@@ -1718,32 +1713,9 @@ function claimChildNodes(parent) {
       n--;
       continue;
     }
-    if (isPlaceholderScaffolding(node, t)) continue;
     out.push(node);
   }
   return out;
-}
-
-// A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
-// its `<!--pl-X-->` end marker — is excluded from claim arrays but kept in
-// the DOM (see stripTextSeparators).
-// A document stream also wraps the scaffold in a `<?start name>`…`<?end>`
-// range: processing instructions where the parser has them, comments
-// elsewhere, and comments everywhere once the inline runtime has run
-// (`$dpi`).
-function isPlaceholderScaffolding(node, t) {
-  if (t === 1) return node.localName === "template" && node.id.startsWith("pl-");
-  const v = markerText(node);
-  return v.startsWith("pl-") || v.startsWith("?start") || v === "?end";
-}
-
-// A comment's text — or, for a `<?start …>`/`<?end>` processing instruction,
-// the text of the comment it is elsewhere (`?start`, `?end`): the inline
-// runtime leaves comments without a name, so the kind is all a marker says.
-// "" for any other node.
-function markerText(node) {
-  const t = node.nodeType;
-  return t === 7 ? "?" + node.target : t === 8 ? node.nodeValue : "";
 }
 
 /**
@@ -2641,23 +2613,60 @@ export function hydrate(code, element, options = {}) {
   sharedConfig.has = id => id in globalThis._$HY.r;
   sharedConfig.gather = root => gatherHydratable(element, root);
   sharedConfig.loadModuleAssets = loadModuleAssets;
-  sharedConfig.cleanupFragment = id => {
+  // A streamed boundary's placeholder range: `tpl` (`<template id="pl-X">`)
+  // up to its `<!--pl-X-->`, or (a document stream) from the `<?start>`
+  // ahead of `tpl` to the `<?end>` that balances it — a range nested in the
+  // fallback is a sibling with its own pair. A marker is a processing
+  // instruction where the parser has them and a comment elsewhere.
+  const marker = node =>
+    node
+      ? node.nodeType === 7
+        ? "?" + node.target
+        : node.nodeType === 8
+          ? node.nodeValue
+          : ""
+      : "";
+  const rangeEnd = (tpl, id) => {
+    for (let node = tpl, depth = 0, m; (node = node.nextSibling); ) {
+      if ((m = marker(node)) === "pl-" + id || (m === "?end" && !depth--)) return node;
+      if (m.startsWith("?start")) depth++;
+    }
+  };
+  // A marker the client owns is a comment: the inline runtime replaces the
+  // processing instructions it finds (`$dpi`), and the owner would be left
+  // holding a node that is no longer in the document.
+  const own = node => {
+    if (node && node.nodeType === 7)
+      node.replaceWith((node = document.createComment("?" + node.target)));
+    return node;
+  };
+  sharedConfig.holdPlace = () => {
+    const node = document.createComment("");
+    node._$h = 1;
+    return node;
+  };
+  sharedConfig.fragmentRange = id => {
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
       const start = tpl.previousSibling;
-      // The range closes at its `<!--pl-X-->` comment, or (a document
-      // stream) at the `<?end>` that balances its `<?start>`: a range nested
-      // in the fallback is a sibling carrying its own pair.
-      let depth = 0;
+      return [
+        marker(start).startsWith("?start") ? [own(start), tpl] : tpl,
+        own(rangeEnd(tpl, id)),
+        !tpl._$fl && !!tpl.content?.firstChild
+      ];
+    }
+  };
+  sharedConfig.cleanupFragment = id => {
+    const tpl = document.getElementById("pl-" + id);
+    if (tpl) {
+      const start = tpl.previousSibling,
+        end = rangeEnd(tpl, id);
       for (let node = tpl.nextSibling, next; node; node = next) {
         next = node.nextSibling;
-        const v = markerText(node);
-        const end = v === "pl-" + id || (v === "?end" && !depth--);
-        if (v.startsWith("?start")) depth++;
         node.remove();
-        if (end) break;
+        if (node === end) break;
       }
-      start && markerText(start).startsWith("?start") && start.remove();
+      marker(start).startsWith("?start") && start.remove();
       tpl.remove();
     }
   };
@@ -3289,15 +3298,39 @@ function insertExpression(parent, value, current, marker) {
   // nodes, and reverses them when a sibling's `nextSibling` is the
   // boundary's first node. So the tracked nodes must all be among the items,
   // in the same order — a removal or a reorder still reconciles.
-  if (hydrationRt !== null && sharedConfig.hydrating && value && value.length !== 0) {
+  if (
+    hydrationRt !== null &&
+    sharedConfig.hydrating &&
+    value &&
+    (value._$h || value.length !== 0)
+  ) {
+    // A primitive is the text node already at its position, as the commit
+    // below adopts it: it must not read as a node this hole has yet to place.
+    if (Array.isArray(value) && Array.isArray(current))
+      for (let i = 0, t, prev; i < value.length; i++)
+        if (
+          ((t = typeof value[i]) === "string" || t === "number") &&
+          (prev = current[i]) &&
+          prev.nodeType === 3
+        ) {
+          if (prev.data !== "" + value[i]) prev.data = prev._$d = value[i];
+          value[i] = prev;
+        }
     const tracked = [].concat(current ?? []);
+    let held = false;
     if (
       []
         .concat(value)
-        .every(n => (n === tracked[0] && tracked.shift(), n?.parentNode === parent)) &&
-      !tracked.length
-    )
-      return value;
+        .every(
+          n => (
+            n === tracked[0] && tracked.shift(),
+            n?.parentNode === parent || (n && n._$h && !n.isConnected && (held = true))
+          )
+        )
+    ) {
+      if (held) return current;
+      if (!tracked.length) return value;
+    }
   }
   const t = typeof value;
 

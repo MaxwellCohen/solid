@@ -728,11 +728,9 @@ function ssrLoadingBoundary(
 
   const fallbackOwner = createOwner({ id });
   // The placeholder wrapper around a streaming fallback (see `plainFallback`).
-  // With `templateFor` the scaffold is a declarative-patching range: a
-  // `<?start name>` ahead of the `pl-*` template and `<?end>` in place of
-  // the `<!--pl-X-->` comment, so a browser that supports `<template for>`
-  // swaps the content in natively with scripts off. The `pl-*` template stays
-  // because the client looks the placeholder up by id.
+  // With `templateFor` the scaffold is a declarative-patching range, which
+  // a supporting browser patches with scripts off. The `pl-*` template
+  // stays: the client looks the placeholder up by id.
   const open = `${ctx.templateFor ? `<?start name="${id}">` : ""}<template id="pl-${id}">`;
   const close = ctx.templateFor ? "<?end>" : `<!--pl-${id}-->`;
   const tpl = collapseFallback ? [open, "</template>" + close] : [open + "</template>", close];

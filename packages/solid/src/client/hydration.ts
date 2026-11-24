@@ -155,6 +155,8 @@ type SharedConfig = {
   boundaryScopes?: Map<string, { registry?: Map<string, object>; gather?: (key: string) => void }>;
   captureBoundaryScope?: (id: string) => void;
   cleanupFragment?: (id: string) => void;
+  holdPlace?: () => any;
+  fragmentRange?: (id: string) => [lead: any, end: any, parked: boolean] | undefined;
   loadModuleAssets?: (mapping: Record<string, string>) => Promise<void> | undefined;
   registry?: Map<string, object>;
   completed?: WeakSet<object> | null;
@@ -1545,7 +1547,9 @@ function lazyHydrationLookup<T>(
       );
     return () => component as T;
   }
-  if (!comp && moduleUrl) {
+  // (Only a claim needs the module now: a boundary rendered fresh loads it
+  // through the import.)
+  if (!comp && moduleUrl && isClaiming()) {
     // moduleUrl present means the bundler transform ran, so the server
     // must have registered this position. A miss is a broken preload — the
     // server never filed a client entry under this id, or filed it under a
@@ -2478,7 +2482,6 @@ function initBoundaryResume(
     if (!isDisposed(o as Owner)) return;
     sharedConfig.cleanupFragment?.(id);
     if (release()) checkHydrationComplete();
-    settleSwap(id);
   });
   const set = createBoundaryTrigger();
   return [
@@ -2551,37 +2554,12 @@ function fragmentState(id: string) {
 // page without one never asks, and does not carry the predicate.
 let _ownedFragment: ((id: string) => boolean) | undefined;
 
-// One claimed swap in flight at a time. A claimed fragment swapped in
-// removes its boundary's fallback before the boundary resumes; until then the
-// client still counts those fallback nodes as rendered. A second claimed swap
-// landing in that window (a reveal group releasing several fragments in one
-// batch) would leave a sibling's resume to reconcile the parent against the
-// stale fallback, putting it back over the swapped-in content — and the
-// boundary, when it resumes, finds the fallback instead of its content and
-// renders fresh. So a claimed swap waits while another is in flight and runs,
-// in order, once that one's resume has flushed (`settleSwap`): the same
-// microtask burst, before the browser paints.
-let _swapping: string | 0 = 0;
-const _swapQueue: string[] = [];
-
 function fragmentPolicy(id: string) {
   const f = fragmentState(id);
-  // (A repeat $df of a queued id finds no template when it replays: a no-op.)
-  if (f.claimed && _swapping && _swapping !== id) return (_swapQueue.push(id), 0);
-  if (!_hydrationDone || f.claimed || (_ownedFragment !== undefined && _ownedFragment(id))) {
-    const swapped = (globalThis as any).$dfr(id);
-    if (swapped && f.claimed) _swapping = id;
-    return swapped;
-  }
+  if (!_hydrationDone || f.claimed || (_ownedFragment !== undefined && _ownedFragment(id)))
+    return (globalThis as any).$dfr(id);
   f.held = true;
   return 0;
-}
-
-// The claimant of the swap in flight resumed (its flush ran) or is gone: the
-// next queued claimed swap may land.
-function settleSwap(id: string) {
-  if (_swapping === id)
-    for (_swapping = 0; !_swapping && _swapQueue.length; ) fragmentPolicy(_swapQueue.shift()!);
 }
 
 // Ownership by rendering (see the ledger's policy above): the fragment's
@@ -2959,6 +2937,18 @@ function hydratedCreateLoadingBoundary<T, U>(
   if (!sharedConfig.hydrating || noHydrationId()) return coreLoadingBoundary(fn, fallback, options);
 
   let settledSerializationResumeQueued = false;
+  // While the content waits to claim server DOM the boundary shows `held`, a
+  // node that stands for it: the slot keeps the server nodes it tracks. A
+  // render that puts `held` in the document has taken those nodes out, and
+  // the content then renders fresh.
+  let held: any;
+  const hold = () => (held = sharedConfig.holdPlace?.());
+  // A fallback still in the document sits in its placeholder's range, and the
+  // boundary shows the whole range: a reorder moves it, a removal takes it.
+  const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>
+    range ? [range[0], range[2] ? undefined : fallback(), range[1]] : fallback();
+  const claim = (resume: (shouldHydrate?: boolean | 0) => void) => (shouldHydrate?: boolean | 0) =>
+    resume(shouldHydrate !== 0 && held && held.isConnected ? false : shouldHydrate);
 
   return coreMemo(() => {
     const o = getOwner()!;
@@ -2985,8 +2975,8 @@ function hydratedCreateLoadingBoundary<T, U>(
         if (assetPromise) {
           settledSerializationResumeQueued = true;
           const [, resume] = initBoundaryResume(o, id);
-          scheduleResumeAfterAssets(id, resume, assetPromise);
-          return undefined;
+          scheduleResumeAfterAssets(id, claim(resume), assetPromise);
+          return hold();
         }
         // Already settled: the server rendered content and it is in the DOM.
         // Hydrate straight through — the fallback only hydrates when it is
@@ -3066,10 +3056,7 @@ function hydratedCreateLoadingBoundary<T, U>(
 
       settledSerializationResumeQueued = true;
       const [, resumeBoundary] = initBoundaryResume(o, id);
-      const resume = (shouldHydrate?: boolean | 0) => {
-        resumeBoundary(shouldHydrate);
-        settleSwap(id);
-      };
+      const resume = claim(resumeBoundary);
       // Observe: the clock for a recovery record, read only when someone
       // will hear it (a listener on "recovery"). Prod: a dead constant.
       const registeredAt =
@@ -3086,7 +3073,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         // straight through here claims keys the document never emitted (the
         // welcome/status mid-stream ticker miss).
         waitAndResume(1, () => resume(false), assetPromise);
-        return fallback();
+        return ranged(id);
       }
 
       if (s === 1 || s === 2) {
@@ -3104,7 +3091,7 @@ function hydratedCreateLoadingBoundary<T, U>(
           return undefined;
         }
         scheduleResumeAfterAssets(id, resume, assetPromise);
-        return undefined;
+        return hold();
       }
 
       // The fragment is still streaming, and global hydration may already
@@ -3125,16 +3112,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         fr,
         shouldHydrate =>
           shouldHydrate
-            ? whenRevealed(id, () => {
-                // A fragment can be the first to carry the boundary's
-                // module map (its content rendered after the shell
-                // flushed): load what it brought before claiming the
-                // revealed content. Resuming first renders nothing while
-                // the module loads, and that empty render clears the
-                // parent (#4087).
-                const assets = boundaryAssets(id);
-                assets ? waitAndResume(true, resume, assets) : resume(true);
-              })
+            ? whenRevealed(id, () => resume(true))
             : // Rendered fresh. A rejected fragment swapped in over the
               // claimed fallback left its nodes — the server's outcome for
               // the failure, which `$dfr` lists in the reveal record
@@ -3150,37 +3128,38 @@ function hydratedCreateLoadingBoundary<T, U>(
         0,
         fragmentAbort(id)
       );
-      if (revealed) return undefined;
-      // A collapsed slot: the server parked its fallback inside the
-      // placeholder template, and nothing has materialized it yet. There is
-      // nothing in the document to hydrate — the runtime inserts the
-      // fallback itself if the frontier reaches this slot first.
-      const pl = document.getElementById("pl-" + id) as any;
-      if (pl) {
-        if (!pl._$fl && pl.content?.firstChild) return undefined;
-        // The fallback sits inside the patching range, behind its start
-        // marker (or, without ranges, the placeholder template). Tag its
-        // first node with that start: a sibling's content reconciled in
-        // before this boundary has to land ahead of the range, or this
-        // fragment's swap removes it (see reconcileArrays).
-        const start = pl.previousSibling;
-        if (pl.nextSibling)
-          pl.nextSibling._$rs =
-            start && /^\??start/.test(start.target || start.nodeValue) ? start : pl;
+      if (revealed) return hold();
+      // The swap takes the range this boundary shows out of the document, so
+      // the boundary resumes at the swap, not at the settlement the wire
+      // delivers after it: unsettled, the resume holds the content's place.
+      const again = () => {
+        off();
+        settledSerializationResumeQueued = false;
+        resume(true);
+      };
+      const off = subscribeFragments(swapped => swapped === id && hy.v?.[id] && again());
+      onCleanup(off);
+      const range = sharedConfig.fragmentRange?.(id);
+      // A collapsed slot's fallback is parked in its placeholder; the
+      // boundary hydrates it once the inline runtime shows it (`$dfl`
+      // calls `_$HY.fl[id]`).
+      if (range && range[2]) {
+        (hy.fl ||= {})[id] = again;
+        onCleanup(() => delete hy.fl[id]);
       }
-      return fallback();
+      return ranged(id, range);
     }
 
     if (assetPromise && !sharedConfig.has!(id)) {
       const [, resume] = initBoundaryResume(o, id);
       assetPromise.then(
-        () => resume(),
+        () => claim(resume)(),
         err => {
           reportAssetFailure(err);
           resume(false);
         }
       );
-      return undefined;
+      return hold();
     }
     return coreLoadingBoundary(fn, fallback, options);
   }) as unknown as Accessor<T | U>;
