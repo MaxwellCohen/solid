@@ -230,17 +230,21 @@ export function createHeldApp(shape: Shape) {
           </Loading>
         </>
       ) : shape === "fresh-over-swap" ? (
-        // A boundary waiting on its module holds one whose fragment streams.
-        <Loading fallback={<i>f</i>}>
-          <LateBox>
-            <Item name="a" />
-            <Loading fallback={<i>g</i>}>
-              <Wait ms={10}>
-                <Item name="b" />
-              </Wait>
-            </Loading>
-          </LateBox>
-        </Loading>
+        // A boundary waiting on its module holds one whose fragment streams;
+        // a sibling follows it in the slot.
+        <>
+          <Loading fallback={<i>f</i>}>
+            <LateBox>
+              <Item name="a" />
+              <Loading fallback={<i>g</i>}>
+                <Wait ms={10}>
+                  <Item name="b" />
+                </Wait>
+              </Loading>
+            </LateBox>
+          </Loading>
+          <em>e</em>
+        </>
       ) : shape === "fresh-over-span" ? (
         // A boundary waiting on its module holds another one that does.
         <Loading fallback={<i>f</i>}>

@@ -500,7 +500,10 @@ describe("a boundary that cannot claim yet holds its place", () => {
         await settle();
         page.land();
         await settle();
-        expect(page.main().textContent).toBe("a:0b:0");
+        // Once each, ahead of the sibling that follows the boundary.
+        expect(page.main().innerHTML.replace(/<!--.*?-->| _hk="[^"]*"/g, "")).toBe(
+          '<b id="a">a:0</b><b id="b">b:0</b><em>e</em>'
+        );
         expect(swapped.map(k => page.hy.v[k])).toEqual([1]);
       },
       /module preload failed/

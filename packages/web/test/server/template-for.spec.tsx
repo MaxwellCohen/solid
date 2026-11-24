@@ -133,6 +133,7 @@ describe("templateFor", () => {
         fallback={
           <i title={text}>
             <style>{"i::after{content:'<?end>'}"}</style>
+            <span innerHTML={"<STYLE>p::after{content:'<?end>'}</Style>"} />
             <span innerHTML={"<!--<?end>-->"} />
             wait
           </i>
