@@ -1678,13 +1678,9 @@ export function installHydrationRuntime() {
 
 // Drop the `<!--!$-->` text-hole separators the server emits so adjacent
 // text nodes stay individually claimable; the array is compacted in place.
-// A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
-// its `<!--pl-X-->` end marker — is excluded from the claim array but KEPT in
-// the DOM (the $df swap still needs it). While the boundary is pending its
-// fallback hydrates into the region between the two; counting the scaffolding
-// shifted every positional text claim, so the fallback's reactive text never
-// adopted the server node and updates appended beside it as permanent debris
-// (solidjs/solid#2936).
+// A pending boundary's placeholder scaffolding stays in the claim array: the
+// boundary renders it around its fallback (`sharedConfig.fragmentRange`), so
+// positions line up and the scaffold moves and leaves with the boundary.
 function stripTextSeparators(nodes) {
   let j = 0;
   for (let i = 0; i < nodes.length; i++) {
@@ -1694,7 +1690,6 @@ function stripTextSeparators(nodes) {
       node.remove();
       continue;
     }
-    if (isPlaceholderScaffolding(node, t)) continue;
     nodes[j++] = node;
   }
   nodes.length = j;
@@ -1718,19 +1713,9 @@ function claimChildNodes(parent) {
       n--;
       continue;
     }
-    if (isPlaceholderScaffolding(node, t)) continue;
     out.push(node);
   }
   return out;
-}
-
-// A pending boundary's placeholder scaffolding — `<template id="pl-X">` and
-// its `<!--pl-X-->` end marker — is excluded from claim arrays but kept in
-// the DOM (see stripTextSeparators).
-function isPlaceholderScaffolding(node, t) {
-  return t === 8
-    ? node.nodeValue.startsWith("pl-")
-    : t === 1 && node.localName === "template" && node.id.startsWith("pl-");
 }
 
 /**
@@ -2628,19 +2613,87 @@ export function hydrate(code, element, options = {}) {
   sharedConfig.has = id => id in globalThis._$HY.r;
   sharedConfig.gather = root => gatherHydratable(element, root);
   sharedConfig.loadModuleAssets = loadModuleAssets;
+  // A marker is read as the comment the inline runtime makes of a processing
+  // instruction (`$dpi`): an owner would otherwise hold a node it removes.
+  const own = node => {
+    if (node && node.nodeType === 7)
+      node.replaceWith((node = document.createComment("?" + node.target)));
+    return node;
+  };
+  const marker = node => (node && node.nodeType === 8 ? node.nodeValue : "");
+  const rangeEnd = (tpl, id) => {
+    for (let node = tpl, depth = 0, m; (node = own(node.nextSibling)); ) {
+      if ((m = marker(node)) === "pl-" + id || (m === "?end" && !depth--)) return node;
+      if (m.startsWith("?start")) depth++;
+    }
+  };
+  // The list itself: the runtime keeps it current through later swaps
+  // (`$dfz`). Claims drop the text separators.
+  sharedConfig.holdPlace = (id, swapped) => {
+    const hy = globalThis._$HY,
+      nodes = (hy.hs && hy.hs[id]) || (swapped && swapped.splice && swapped);
+    if (nodes)
+      for (let i = nodes.length, n; i--; )
+        ((n = nodes[i]).isConnected && n.nodeValue !== "!$") || nodes.splice(i, 1);
+    return nodes;
+  };
+  // The markers come out before anything claims, so positions are the
+  // server's. An element with no key is never claimed (`<NoHydration>`): it
+  // stays untracked, as it would without a wait.
+  const spans = roots => {
+    const open = {},
+      done = [],
+      visit = n => {
+        const m = /^(\/?)ph-(.+)/.exec(n.nodeValue);
+        let c = m && open[m[2]],
+          l;
+        if (!m) return;
+        if (!m[1]) open[m[2]] = n;
+        else if (c) {
+          done.push(c, n);
+          (hy.hs ||= {})[m[2]] = l = [];
+          while ((c = c.nextSibling) && c !== n)
+            (c.nodeType !== 1 || c.hasAttribute("_hk") || /^pl-/.test(c.id)) &&
+              l.push((c = own(c)));
+        }
+      };
+    for (const r of roots)
+      if (r.nodeType === 8) visit(r);
+      else for (let w = document.createTreeWalker(r, 128), n; (n = w.nextNode()); ) visit(n);
+    done.forEach(n => n.remove());
+  };
+  spans([element]);
+  // A swap's spans are listed before the swap is announced.
+  if (!(hy.fe && hy.fe._$s)) {
+    const fe = hy.fe;
+    (hy.fe = (id, parent) => {
+      const swapped = hy.v && hy.v[id];
+      swapped && swapped.splice && spans(swapped);
+      fe && fe(id, parent);
+    })._$s = 1;
+  }
+  sharedConfig.fragmentRange = id => {
+    const tpl = document.getElementById("pl-" + id);
+    if (tpl) {
+      const start = own(tpl.previousSibling);
+      return [
+        marker(start).startsWith("?start") ? [start, tpl] : tpl,
+        rangeEnd(tpl, id),
+        !tpl._$fl && !!(tpl.content || tpl).firstChild
+      ];
+    }
+  };
   sharedConfig.cleanupFragment = id => {
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
-      let node = tpl.nextSibling;
-      while (node) {
-        const next = node.nextSibling;
-        if (node.nodeType === 8 && node.nodeValue === "pl-" + id) {
-          node.remove();
-          break;
-        }
+      const start = own(tpl.previousSibling),
+        end = rangeEnd(tpl, id);
+      for (let node = tpl.nextSibling, next; node; node = next) {
+        next = node.nextSibling;
         node.remove();
-        node = next;
+        if (node === end) break;
       }
+      marker(start).startsWith("?start") && start.remove();
       tpl.remove();
     }
   };

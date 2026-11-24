@@ -701,10 +701,21 @@ function ssrLoadingBoundary(
     (retryPromise as any)?.$clientHole === true ||
     !!(ret as any)?.p?.some((p: any) => p.$clientHole);
 
+  // Content that loads a module the client may not have yet goes out between
+  // `<!--ph-ID-->` and `<!--/ph-ID-->`: the boundary holds that markup's
+  // place until it can claim it (the client lists it, `hydrate()`).
+  const span = (v: any) => {
+    if (!ctx.getBoundaryModules?.(id)) return v;
+    const open = `<!--ph-${id}-->`,
+      close = `<!--/ph-${id}-->`;
+    return typeof v === "string" ? open + v + close : ctx.ssr([open, close], ctx.escape(v));
+  };
+
   let ret = runDiscovery();
   if (!retryPromise && !ret?.p?.length) {
     commitBoundaryState();
-    return skipLive(() => ret);
+    const content = span(ret);
+    return skipLive(() => content);
   }
 
   const regResult = revealGroup
@@ -728,9 +739,12 @@ function ssrLoadingBoundary(
 
   const fallbackOwner = createOwner({ id });
   // The placeholder wrapper around a streaming fallback (see `plainFallback`).
-  const tpl = collapseFallback
-    ? [`<template id="pl-${id}">`, `</template><!--pl-${id}-->`]
-    : [`<template id="pl-${id}"></template>`, `<!--pl-${id}-->`];
+  // With `templateFor` the scaffold is a declarative-patching range, which
+  // a supporting browser patches with scripts off. The `pl-*` template
+  // stays: the client looks the placeholder up by id.
+  const open = `${ctx.templateFor ? `<?start name="${id}">` : ""}<template id="pl-${id}">`;
+  const close = ctx.templateFor ? "<?end>" : `<!--pl-${id}-->`;
+  const tpl = collapseFallback ? [open, "</template>" + close] : [open + "</template>", close];
   const fallbackResult = runWithOwner(fallbackOwner, () => {
     if (!ctx.async || finalAtDiscovery) return fallback();
     return ctx.ssr(tpl, ctx.escape(fallback()));
@@ -758,7 +772,13 @@ function ssrLoadingBoundary(
   }
 
   if (ctx.async) {
-    const regOpts = revealGroup ? { revealGroup: revealGroup.id } : undefined;
+    // A collapsed slot hands over its plain fallback: with `templateFor`
+    // the renderer patches it in natively when the frontier reaches the slot.
+    const regOpts = revealGroup
+      ? collapseFallback
+        ? { revealGroup: revealGroup.id, fallback: plainFallback }
+        : { revealGroup: revealGroup.id }
+      : undefined;
     const settle = ctx.registerFragment(id, regOpts);
     done = (value, error, escaped) => ((container.open = false), settle(value, error, escaped));
     container.open = true;
@@ -857,7 +877,7 @@ function ssrLoadingBoundary(
           if (disposed) return abandon();
           if (discarded) return;
         }
-        const streamed = done!(value);
+        const streamed = done!(typeof value === "string" ? span(value) : value);
         record("settled", streamed);
       } catch (err) {
         // A failure whose outcome is still resolving settles when it lands.

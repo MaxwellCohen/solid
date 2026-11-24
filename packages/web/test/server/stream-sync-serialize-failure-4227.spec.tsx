@@ -26,7 +26,11 @@ import { pipeSettle, settle, watchEscapes } from "./stream-settle-harness.js";
 /** The hydration registry the page's scripts build, run as a browser would. */
 function registry(html: string) {
   const sandbox: any = {
-    document: { getElementById: () => null, addEventListener() {} },
+    document: {
+      getElementById: () => null,
+      createTreeWalker: () => ({ nextNode: () => null }),
+      addEventListener() {}
+    },
     _$HY: { r: {}, fe() {} }
   };
   sandbox.self = sandbox;

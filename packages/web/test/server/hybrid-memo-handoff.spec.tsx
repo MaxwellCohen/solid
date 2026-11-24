@@ -30,7 +30,7 @@ describe("hybrid memo/signal under a streamed Loading (memo-shaped #3574) — se
       // The late chunk's script order is the trigger: the node's answer
       // resolves before the fragment is revealed, so the client's handoff
       // can start before the boundary resumes.
-      const swap = rest.indexOf("$df(");
+      const swap = rest.indexOf('$df("');
       expect(swap).toBeGreaterThan(-1);
       expect(rest.slice(0, swap)).toContain("true:0");
 

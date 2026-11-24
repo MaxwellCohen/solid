@@ -155,6 +155,8 @@ type SharedConfig = {
   boundaryScopes?: Map<string, { registry?: Map<string, object>; gather?: (key: string) => void }>;
   captureBoundaryScope?: (id: string) => void;
   cleanupFragment?: (id: string) => void;
+  holdPlace?: (id: string, swapped?: any) => any;
+  fragmentRange?: (id: string) => [lead: any, end: any, parked: boolean] | undefined;
   loadModuleAssets?: (mapping: Record<string, string>) => Promise<void> | undefined;
   registry?: Map<string, object>;
   completed?: WeakSet<object> | null;
@@ -1545,7 +1547,7 @@ function lazyHydrationLookup<T>(
       );
     return () => component as T;
   }
-  if (!comp && moduleUrl) {
+  if (!comp && moduleUrl && isClaiming()) {
     // moduleUrl present means the bundler transform ran, so the server
     // must have registered this position. A miss is a broken preload — the
     // server never filed a client entry under this id, or filed it under a
@@ -2393,6 +2395,10 @@ function resumeBoundaryHydration(
   // client-gated nodes the resume created compute in the flush below). A
   // claiming resume turns it on for its window alone.
   _hydratingValue = false;
+  // Rendered fresh over the server markup this boundary held: its span list
+  // is that markup as the document has it now (later swaps under it
+  // included), where the slot's own record of it may be older.
+  if (!shouldHydrate) (globalThis as any)._$HY?.hs?.[id]?.forEach((n: ChildNode) => n.remove());
   shouldHydrate
     ? // A late resume claims against the root this boundary registered under
       // (the captured `scope`), its subtree the snapshot and live scope for
@@ -2416,6 +2422,16 @@ function resumeBoundaryHydration(
       // the registry) computes.
       servedPass(set, shouldHydrate === 0 && o)();
   flush();
+  // A fresh render takes out server markup whose boundaries never hydrate
+  // to drop their lists (those under this one): any list left with no node
+  // in the document only keeps nodes alive.
+  if (!shouldHydrate) {
+    const hy = (globalThis as any)._$HY;
+    for (const m of [hy?.v, hy?.hs])
+      for (const k in m)
+        m[k].some?.((n: Node) => n.isConnected) === false &&
+          (m === hy.v ? (m[k] = 1) : delete m[k]);
+  }
   checkHydrationComplete();
 }
 
@@ -2491,7 +2507,7 @@ function initBoundaryResume(
 //
 // The streaming layer's inline script owns only the parse-time swap
 // MECHANICS ($dfr: replace the `pl-*` range with the template payload, then
-// record the reveal as `_$HY.v[id] = 1`); this module owns the reveal
+// record the reveal in `_$HY.v[id]`); this module owns the reveal
 // POLICY, and it answers every "what may the document still deliver?"
 // question from records rather than DOM scans. The ledger's states:
 //
@@ -2933,10 +2949,21 @@ function hydratedCreateLoadingBoundary<T, U>(
   if (!sharedConfig.hydrating || noHydrationId()) return coreLoadingBoundary(fn, fallback, options);
 
   let settledSerializationResumeQueued = false;
+  const hold = (id: string) => sharedConfig.holdPlace?.(id, (globalThis as any)._$HY.v?.[id]);
+  // A list keeps its nodes alive: it goes once the boundary claims, or with
+  // the boundary.
+  const drop = (id: string, hy = (globalThis as any)._$HY) => {
+    if (hy?.v?.[id]) hy.v[id] = 1;
+    if (hy?.hs) delete hy.hs[id];
+  };
+  // The whole range, so a reorder moves it and a removal takes it.
+  const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>
+    range ? [range[0], range[2] ? undefined : fallback(), range[1]] : fallback();
 
   return coreMemo(() => {
     const o = getOwner()!;
     const id = o.id!;
+    onCleanup(() => isDisposed(o) && drop(id));
 
     const assetPromise = sharedConfig.hydrating ? boundaryAssets(id) : undefined;
 
@@ -2960,12 +2987,13 @@ function hydratedCreateLoadingBoundary<T, U>(
           settledSerializationResumeQueued = true;
           const [, resume] = initBoundaryResume(o, id);
           scheduleResumeAfterAssets(id, resume, assetPromise);
-          return undefined;
+          return hold(id);
         }
         // Already settled: the server rendered content and it is in the DOM.
         // Hydrate straight through — the fallback only hydrates when it is
         // actually showing. Rendering it here would create phantom client DOM
         // and poison insert's node bookkeeping (#2801 bug 1).
+        drop(id);
         return coreLoadingBoundary(fn, fallback, options);
       }
       if (p) {
@@ -3035,6 +3063,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         // create phantom client DOM and poison insert's node bookkeeping
         // (#2801 bug 1).
         sharedConfig.gather?.(id);
+        drop(id);
         return coreLoadingBoundary(fn, fallback, options);
       }
 
@@ -3056,7 +3085,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         // straight through here claims keys the document never emitted (the
         // welcome/status mid-stream ticker miss).
         waitAndResume(1, () => resume(false), assetPromise);
-        return fallback();
+        return ranged(id);
       }
 
       if (s === 1 || s === 2) {
@@ -3074,7 +3103,7 @@ function hydratedCreateLoadingBoundary<T, U>(
           return undefined;
         }
         scheduleResumeAfterAssets(id, resume, assetPromise);
-        return undefined;
+        return hold(id);
       }
 
       // The fragment is still streaming, and global hydration may already
@@ -3088,13 +3117,17 @@ function hydratedCreateLoadingBoundary<T, U>(
       const hy = (globalThis as any)._$HY;
       // Revealed ahead of its `_fr` settlement (two scripts on the wire; an
       // async entry can run between them, #4074): the fallback is gone and
-      // the content is in the DOM, so render nothing until the resume
+      // the content is in the DOM, so hold its place until the resume
       // adopts it.
       const revealed = hy.v?.[id];
+      // Set once the boundary has resumed at its swap and registered again:
+      // the settlement is that registration's to answer.
+      let resumed = false;
       waitAndResume(
         fr,
         shouldHydrate =>
-          shouldHydrate
+          resumed ||
+          (shouldHydrate
             ? whenRevealed(id, () => {
                 // A fragment can be the first to carry the boundary's
                 // module map (its content rendered after the shell
@@ -3113,14 +3146,43 @@ function hydratedCreateLoadingBoundary<T, U>(
               (revealed || hy.v?.[id]?.forEach?.((n: ChildNode) => n.remove()),
               IS_OBSERVE
                 ? recover(id, registeredAt, () => resume(shouldHydrate))
-                : resume(shouldHydrate)),
+                : resume(shouldHydrate))),
         assetPromise,
         // A rejection (the server's, or the stream cut short) resumes with 0:
         // the fresh render adopts what the server sent (resumeBoundaryHydration).
         0,
         fragmentAbort(id)
       );
-      return revealed ? undefined : fallback();
+      if (revealed) return hold(id);
+      // The swap takes the range this boundary shows out of the document, so
+      // the boundary resumes at the swap, not at the settlement the wire
+      // delivers after it: unsettled, the resume holds the content's place.
+      // (It runs inside the inline runtime's swap: an error the resume does
+      // not catch must not stop the runtime, and is thrown from a microtask.)
+      const again = () => {
+        off();
+        resumed = true;
+        settledSerializationResumeQueued = false;
+        try {
+          resume(true);
+        } catch (err) {
+          queueMicrotask(() => {
+            throw err;
+          });
+        }
+      };
+      // (Only a swap that lists its nodes: there is nothing else to hold.)
+      const off = subscribeFragments(swapped => swapped === id && hy.v?.[id]?.splice && again());
+      onCleanup(off);
+      const range = sharedConfig.fragmentRange?.(id);
+      // A collapsed slot's fallback is parked in its placeholder; the
+      // boundary hydrates it once the inline runtime shows it (`$dfl`
+      // calls `_$HY.fl[id]`).
+      if (range && range[2]) {
+        (hy.fl ||= {})[id] = again;
+        onCleanup(() => delete hy.fl[id]);
+      }
+      return ranged(id, range);
     }
 
     if (assetPromise && !sharedConfig.has!(id)) {
@@ -3132,8 +3194,9 @@ function hydratedCreateLoadingBoundary<T, U>(
           resume(false);
         }
       );
-      return undefined;
+      return hold(id);
     }
+    drop(id);
     return coreLoadingBoundary(fn, fallback, options);
   }) as unknown as Accessor<T | U>;
 }

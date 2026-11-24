@@ -322,7 +322,7 @@ describe("setLinkClaim: the per-render handler and its record", () => {
     ]);
     // Written during the shell pass: the record is in the shell's script,
     // ahead of the fragment.
-    expect(html.indexOf('_$HY.r["links"]=1')).toBeLessThan(html.indexOf('<template id="0">'));
+    expect(html.indexOf('_$HY.r["links"]=1')).toBeLessThan(html.indexOf('<template id="0"'));
     expect(hydrationRecordKeys(html)).toContain("links");
   });
 

@@ -4194,6 +4194,40 @@ function record(
   return wire;
 }
 
+// Where the patching range whose content starts at `at` closes: the index of
+// the `<?end>` that balances it, or -1. A marker counts only where the parser
+// reads one: an attribute value, a comment and the text of a raw-text
+// element can hold the same characters.
+const TAG = /<([a-zA-Z][^\s/>]*)(?:[^>"']|"[^"]*"|'[^']*')*>/y;
+export function rangeClose(html: string, at: number): number {
+  for (let depth = 0, i = at, m; (i = html.indexOf("<", i)) !== -1; ) {
+    if (html.startsWith("<?end>", i)) {
+      if (!depth--) return i;
+      i += 6;
+    } else if (html.startsWith("<?start ", i)) {
+      depth++;
+      i += 8;
+    } else if (html.startsWith("<!--", i)) {
+      i = html.indexOf("-->", i + 4);
+      if (i === -1) return -1;
+    } else if (((TAG.lastIndex = i), (m = TAG.exec(html)))) {
+      i = TAG.lastIndex;
+      if (/^(script|style|textarea|title|xmp|iframe|noembed|noframes)$/i.test(m[1])) {
+        const close = new RegExp("</" + m[1], "gi");
+        close.lastIndex = i;
+        i = close.exec(html)?.index ?? i;
+      }
+    } else i++;
+  }
+  return -1;
+}
+
+// Whether `t`, which opens a patching range, is that range and nothing
+// after it: the `<?end>` that balances its `<?start>` is the last thing in it.
+function isOneRange(t: string): boolean {
+  return rangeClose(t, t.indexOf(">") + 1) === t.length - 6;
+}
+
 export function createErrorBoundary<T, U>(
   fn: () => T,
   fallback: (error: Accessor<unknown>, reset: () => void) => U
@@ -4418,8 +4452,13 @@ export function createErrorBoundary<T, U>(
       (outcome === true
         ? !inServerComponentScope(owner as unknown as SSROwner)
         : typeof t !== "string" ||
-          !t.startsWith(`<template id="pl-${outcome}"`) ||
-          !t.endsWith(`<!--pl-${outcome}-->`))
+          // The scaffold in either shape: `pl-*` template to `<!--pl-X-->`,
+          // or the `templateFor` patching range.
+          !(
+            (t.startsWith(`<template id="pl-${outcome}"`) && t.endsWith(`<!--pl-${outcome}-->`)) ||
+            (t.startsWith(`<?start name="${outcome}"><template id="pl-${outcome}"`) &&
+              isOneRange(t))
+          ))
     )
       return undefined;
     return drawFallback(err, outcome, parentHandler);

@@ -35,7 +35,8 @@ for (const order of ["ab", "ba"] as Order[]) {
     expect(chunks.length).toBe(3);
     expect(chunks[0]).toMatch(/^<script>/);
     expect(chunks[0]).not.toContain("<template");
-    expect(chunks[1]).toMatch(/^<template id="/);
+    // the first fragment follows the `$df` runtime, which has to load first
+    expect(chunks[1]).toMatch(/^<script>function \$df\([\s\S]*?<\/script><template id="/);
     expect(chunks[2]).toMatch(/^<template id="/);
     writeArtifact(`generic-hydration-${order}`, { shell, chunks });
   });

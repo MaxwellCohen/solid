@@ -2832,9 +2832,9 @@ describe("SSR Streaming — Reveal", () => {
 
     expect(full).toContain("B-content");
     // B's slot must be activated, and only after its template streamed.
-    const templateIdx = full.search(/<template id="(\d+)"><div[^>]*>B-content/);
+    const templateIdx = full.search(/<template id="(\d+)"(?: for="\d+")?><div[^>]*>B-content/);
     expect(templateIdx).toBeGreaterThan(-1);
-    const key = full.match(/<template id="(\d+)"><div[^>]*>B-content/)![1];
+    const key = full.match(/<template id="(\d+)"(?: for="\d+")?><div[^>]*>B-content/)![1];
     const activationIdx = full.indexOf(`$dfj(["${key}"])`);
     expect(activationIdx).toBeGreaterThan(templateIdx);
     // A's rejection is serialized so the client error path takes over.
@@ -3018,8 +3018,8 @@ describe("SSR Streaming — Reveal", () => {
 
       const { chunks } = await chunksPromise;
       const full = chunks.join("");
-      const key = full.match(/<template id="(\d+)"><div[^>]*>async content/)?.[1];
-      const templateIndex = full.indexOf(`<template id="${key}">`);
+      const key = full.match(/<template id="(\d+)"(?: for="\d+")?><div[^>]*>async content/)?.[1];
+      const templateIndex = full.indexOf(`<template id="${key}"`);
       const activationIndex = full.indexOf(`$dfj(["${key}"])`);
 
       expect(full).toContain("static content");
@@ -3066,7 +3066,7 @@ describe("SSR Streaming — Reveal", () => {
 
     const { chunks } = await chunksPromise;
     const full = chunks.join("");
-    const profileKey = full.match(/<template id="(\d+)"><h1[^>]*>profile/)?.[1];
+    const profileKey = full.match(/<template id="(\d+)"(?: for="\d+")?><h1[^>]*>profile/)?.[1];
     const profileActivationIndex = full.indexOf(`$dfj(["${profileKey}"])`);
     const slowTemplateIndex = full.indexOf(">slow card</p></template>");
 
@@ -3122,13 +3122,13 @@ describe("SSR Streaming — Reveal", () => {
 
     const { chunks } = await chunksPromise;
     const full = chunks.join("");
-    const profileTemplate = full.match(/<template id="(\d+)"><h1[^>]*>profile/)?.[1];
-    const fastTemplate = full.match(/<template id="(\d+)"><p[^>]*>fast card/)?.[1];
-    const slowTemplate = full.match(/<template id="(\d+)"><p[^>]*>slow card/)?.[1];
-    const profileTemplateIndex = full.indexOf(`<template id="${profileTemplate}">`);
+    const profileTemplate = full.match(/<template id="(\d+)"(?: for="\d+")?><h1[^>]*>profile/)?.[1];
+    const fastTemplate = full.match(/<template id="(\d+)"(?: for="\d+")?><p[^>]*>fast card/)?.[1];
+    const slowTemplate = full.match(/<template id="(\d+)"(?: for="\d+")?><p[^>]*>slow card/)?.[1];
+    const profileTemplateIndex = full.indexOf(`<template id="${profileTemplate}"`);
     const profileActivationIndex = full.indexOf(`$dfj(["${profileTemplate}"])`);
     const fastActivationIndex = full.indexOf(`$dfj(["${fastTemplate}"])`);
-    const slowTemplateIndex = full.indexOf(`<template id="${slowTemplate}">`);
+    const slowTemplateIndex = full.indexOf(`<template id="${slowTemplate}"`);
     const slowActivationIndex = full.indexOf(`$dfj(["${slowTemplate}"])`);
 
     expect(profileTemplate).toBeDefined();

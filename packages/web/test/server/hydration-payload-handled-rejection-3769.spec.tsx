@@ -38,7 +38,11 @@ async function watchRejections(run: () => Promise<void> | void) {
 /** Runs the document's inline scripts in a fresh realm; returns its `_$HY`. */
 function runPayload(html: string) {
   const sandbox: any = {
-    document: { getElementById: () => null, addEventListener() {} }
+    document: {
+      getElementById: () => null,
+      createTreeWalker: () => ({ nextNode: () => null }),
+      addEventListener() {}
+    }
   };
   sandbox.window = sandbox.self = sandbox;
   vm.createContext(sandbox);
