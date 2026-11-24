@@ -121,7 +121,7 @@ describe("templateFor", () => {
     expect(beside).not.toContain("caught");
   });
 
-  test("a marker in an attribute value or a raw-text element does not close a range", async () => {
+  test("a marker in an attribute value, a comment or a raw-text element does not close a range", async () => {
     const text = "<?end><u>LEAK</u>";
     const Quick = () => {
       const v = createMemo(() => Promise.resolve("quick"));
@@ -132,7 +132,9 @@ describe("templateFor", () => {
       <Loading
         fallback={
           <i title={text}>
-            <style>{"i::after{content:'<?end>'}"}</style>wait
+            <style>{"i::after{content:'<?end>'}"}</style>
+            <span innerHTML={"<!--<?end>-->"} />
+            wait
           </i>
         }
       >

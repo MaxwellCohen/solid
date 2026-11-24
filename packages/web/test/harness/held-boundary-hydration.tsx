@@ -13,6 +13,7 @@
  * writes the chunks test/hydration/held-boundary-hydration.spec.tsx replays.
  */
 import { createMemo, createSignal, For, lazy, Loading, Reveal, Show } from "solid-js";
+import { NoHydration } from "@solidjs/web";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -28,6 +29,7 @@ export const SHAPES = [
   "tails",
   "same-tail",
   "beside",
+  "no-hydration",
   "between",
   "root",
   "preload-retry",
@@ -178,6 +180,17 @@ export function createHeldApp(shape: Shape) {
           </Loading>
           {"tail"}
         </>
+      ) : shape === "no-hydration" ? (
+        // Markup the client never claims, in a boundary that waits on its
+        // module.
+        <Loading fallback={<i>f</i>}>
+          <LateBox>
+            <NoHydration>
+              <p id="st">static</p>
+            </NoHydration>
+            <Item name="a" />
+          </LateBox>
+        </Loading>
       ) : shape === "beside" ? (
         // The shell carries the content; a sibling in the slot changes while
         // the module loads.

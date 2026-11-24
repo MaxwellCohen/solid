@@ -10,6 +10,8 @@
  *   boundary claims them when its module lands;
  * - `hide`: a `<Show>` that hides the boundary takes them out;
  * - `reorder`: a reorder moves the boundary, which then renders fresh;
+ * - `no-hydration`: markup the client never claims stays when the waiting
+ *   boundary resumes;
  * - `reorder-claimed`: a reorder that puts claimed rows ahead of a waiting
  *   one leaves each row its own nodes;
  * - `pending`, `pending-text`: a reorder moves a pending boundary with its
@@ -264,6 +266,17 @@ describe("a boundary that cannot claim yet holds its place", () => {
         expect(page.hy.done).toBe(true);
       })
     );
+
+  everyStart("no-hydration", startAt =>
+    withPage("no-hydration", async page => {
+      await replay(page, "no-hydration", startAt);
+      page.land();
+      await settle();
+      expect(page.main().textContent).toBe("statica:0");
+      expect((page.container.querySelector("#a") as any).$server).toBe(true);
+      expect(page.hy.done).toBe(true);
+    })
+  );
 
   everyStart("reorder-claimed", startAt =>
     withPage("reorder-claimed", async page => {

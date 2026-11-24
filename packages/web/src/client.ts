@@ -3258,19 +3258,16 @@ function eventHandler(e, container, state) {
 const isHeld = n => n && n._$h && !n.isConnected;
 
 // `value` with each stand-in replaced by the server nodes it holds the place
-// of, taken from the nodes of `current` that `value` does not name:
-// - an element belongs to the stand-in whose id starts its hydration key
-//   (a pending placeholder's id likewise); one with no key is a script or a
-//   link the stream wrote;
-// - text, comments and elements with another key go with the node before
-//   them, or to the stand-in at that place in `value`; leading text goes
-//   with the node after it;
-// - a primitive is the text node at its position (past a stand-in, the last
-//   one with its text that no later stand-in owns), or a new one.
+// of. Those nodes are in `current` and nowhere in `value`: an element is a
+// boundary's when its hydration key starts with the boundary's id, and text
+// goes by place. An element with no key is the stream's (a script or a link),
+// or markup the client never claims (`<NoHydration>`): it stays untracked.
 function resolveHeld(value, current) {
   // A stand-in becomes `[its id, ...its nodes]`.
   const helds = [],
-    out = value.map(v => (isHeld(v) ? (helds.push((v = [v._$h])), v) : v));
+    out = value.map(v => (isHeld(v) ? (helds.push((v = [v._$h])), v) : v)),
+    placed = new Set(value),
+    at = new Map(current.map((n, i) => [n, i]));
   let ci = 0,
     seen = 0,
     gap;
@@ -3282,14 +3279,14 @@ function resolveHeld(value, current) {
       n = current[ci];
       key = keyOf(n);
       if (key === 0 || !n.isConnected) continue;
-      // A node `value` places later (a reorder) belongs to no stand-in.
-      if (value.includes(n)) {
+      // A node `value` places itself (a reorder) belongs to no stand-in.
+      if (placed.has(n)) {
         last = 0;
         lead = [];
         continue;
       }
-      // By key, or by place: text, and an element none of them names (the
-      // outcome an `<Errored>` drew where its boundary failed).
+      // An element no stand-in names goes by place: the outcome an
+      // `<Errored>` drew where its boundary failed carries the Errored's key.
       owner = named(key) || last;
       owner ? owner.push(...lead.splice(0), n) : key ? (lead = []) : lead.push(n);
       last = owner;
@@ -3298,12 +3295,14 @@ function resolveHeld(value, current) {
   };
   out.forEach((v, i) => {
     if (Array.isArray(v)) return (seen++, (gap ||= v));
-    let k = v.nodeType ? current.indexOf(v, ci) : -1,
+    let k = v.nodeType && at.get(v) >= ci ? at.get(v) : -1,
       c;
+    // A primitive is the text node at its place; past a stand-in, the last
+    // one with its text that no later stand-in owns.
     if (!v.nodeType)
       for (
         let j = ci;
-        (c = current[j]) && !value.includes(c) && helds.indexOf(named(keyOf(c))) < seen;
+        (c = current[j]) && !placed.has(c) && helds.indexOf(named(keyOf(c))) < seen;
         j++
       ) {
         if (c.nodeType === 3 && (!gap || c.data === "" + v)) k = j;

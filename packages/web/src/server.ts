@@ -3473,8 +3473,9 @@ export function renderToStream(code, options = {}) {
                 settle: () => item.resolve(error)
               }) !== true
                 ? item.resolve(error)
-                : // The completion check still runs: a fragment whose group
-                  // never releases it goes out at the end (releaseUnwritten).
+                : // The completion check still runs, at the depth
+                  // `item.resolve` reaches it: a fragment whose group never
+                  // releases it goes out at the end (releaseUnwritten).
                   queue(() => queue(() => queue(flushEnd)));
             }
           }
@@ -6531,8 +6532,8 @@ function replacePlaceholder(html, key, value) {
 
 // Where the patching range whose content starts at `at` closes: the index of
 // the `<?end>` that balances it, or -1. A marker counts only where the parser
-// reads one: an attribute value can hold the same characters as text, and so
-// can the text of a raw-text element.
+// reads one: an attribute value, a comment and the text of a raw-text
+// element can hold the same characters.
 // (The same scan as rangeClose in solid-js's server.)
 const TAG = /<([a-zA-Z][^\s/>]*)(?:[^>"']|"[^"]*"|'[^']*')*>/y;
 function rangeClose(html, at) {
@@ -6543,9 +6544,12 @@ function rangeClose(html, at) {
     } else if (html.startsWith("<?start ", i)) {
       depth++;
       i += 8;
+    } else if (html.startsWith("<!--", i)) {
+      i = html.indexOf("-->", i + 4);
+      if (i === -1) return -1;
     } else if (((TAG.lastIndex = i), (m = TAG.exec(html)))) {
       i = TAG.lastIndex;
-      if (/^(script|style|textarea|title)$/i.test(m[1]))
+      if (/^(script|style|textarea|title|xmp|iframe|noembed|noframes)$/i.test(m[1]))
         i = Math.max(i, html.indexOf("</" + m[1], i));
     } else i++;
   }
