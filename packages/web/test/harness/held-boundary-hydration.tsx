@@ -25,6 +25,11 @@ export const SHAPES = [
   "collapsed",
   "tail",
   "tails",
+  "same-tail",
+  "beside",
+  "between",
+  "root",
+  "preload-retry",
   "under-held",
   "under-held-collapsed",
   "throws",
@@ -78,6 +83,23 @@ export function createHeldApp(shape: Shape) {
     if (armed) throw new Error("boom");
     return <i>wait b</i>;
   };
+  const [flag, setFlag] = createSignal(false);
+  // No wrapping element: the boundary sits at the hydration root, beside
+  // whatever else the container holds.
+  if (shape === "root")
+    return {
+      App: () => (
+        <>
+          <em>z</em>
+          <Loading fallback={<i>f</i>}>
+            <LateBox>
+              <Item name="a" />
+            </LateBox>
+          </Loading>
+        </>
+      ),
+      ...controls()
+    };
   const App = () => (
     <main>
       {shape === "nested" ? (
@@ -139,6 +161,50 @@ export function createHeldApp(shape: Shape) {
           </Loading>
           {"tail"}
         </>
+      ) : shape === "beside" ? (
+        // The shell carries the content; a sibling in the slot changes while
+        // the module loads.
+        <>
+          <Show when={flag()}>
+            <u>s</u>
+          </Show>
+          <Loading fallback={<i>f</i>}>
+            <LateBox>
+              <Item name="a" />
+            </LateBox>
+          </Loading>
+          <em>e</em>
+        </>
+      ) : shape === "between" ? (
+        // Two boundaries wait on the module with text between them while a
+        // third resumes.
+        <>
+          <Loading fallback={<i>fa</i>}>
+            <LateBox>
+              <Item name="a" />
+            </LateBox>
+          </Loading>
+          {"~"}
+          <Loading fallback={<i>fb</i>}>
+            <LateBox>
+              <Item name="b" />
+              <Item name="b2" />
+            </LateBox>
+          </Loading>
+          <Loading fallback={<i>fc</i>}>
+            <Wait ms={10}>
+              <Item name="c" />
+            </Wait>
+          </Loading>
+        </>
+      ) : shape === "preload-retry" ? (
+        <Loading fallback={<i>f</i>}>
+          <LateBox>
+            <Wait ms={10}>
+              <Item name="a" />
+            </Wait>
+          </LateBox>
+        </Loading>
       ) : shape === "tails" ? (
         // n2 and n4 are released in one batch: two boundaries wait in the
         // slot, each followed by text.
@@ -152,6 +218,22 @@ export function createHeldApp(shape: Shape) {
           <Part name="n4" ms={5}>
             <Part name="n3" ms={0} />
           </Part>
+        </Reveal>
+      ) : shape === "same-tail" ? (
+        // n4's content ends in the same text that follows n4 in the slot.
+        <Reveal>
+          <Reveal order="together" collapsed>
+            <Part name="n0" ms={20} />
+          </Reveal>
+          <Reveal collapsed>
+            <Part name="n1" ms={15} />
+            <Part name="n2" ms={0} />
+            <Part name="n4" ms={0}>
+              <Part name="n3" ms={0} />
+              {"~"}
+            </Part>
+            {"~"}
+          </Reveal>
         </Reveal>
       ) : shape === "under-held" ? (
         // n3 and n4 are released together; n1's fragment follows n3's in the
@@ -227,13 +309,16 @@ export function createHeldApp(shape: Shape) {
       )}
     </main>
   );
-  return {
-    App,
-    /** The server has the module before it renders. */
-    preload: () => LateBox.preload(),
-    hide: () => setShow(false),
-    reverse: () => setOrder(o => [...o].reverse()),
-    relabel: () => setLabel("still"),
-    arm: () => (armed = true)
-  };
+  return { App, ...controls() };
+  function controls() {
+    return {
+      /** The server has the module before it renders. */
+      preload: () => LateBox.preload(),
+      hide: () => setShow(false),
+      reverse: () => setOrder(o => [...o].reverse()),
+      relabel: () => setLabel("still"),
+      arm: () => (armed = true),
+      flag: () => setFlag(true)
+    };
+  }
 }

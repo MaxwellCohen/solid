@@ -17,6 +17,13 @@
  * - `tail`: text after the boundary in the same slot keeps its own node;
  * - `tails`: several boundaries wait in one slot with text between them, and
  *   each still claims its server markup;
+ * - `same-tail`: text that ends a waiting boundary's content and the same
+ *   text after the boundary each keep their node;
+ * - `beside`, `between`: a sibling that changes, or a third boundary that
+ *   resumes, leaves the waiting boundaries' server markup where it is;
+ * - `root`: at the hydration root, what else the container holds stays;
+ * - `preload-retry`: a module load that fails before the fragment arrives
+ *   does not take the swapped-in content out;
  * - `under-held`, `under-held-collapsed`: a fragment, or a collapsed slot's
  *   fallback, that lands inside content its enclosing boundary has not
  *   claimed yet waits for its own boundary, and is claimed with the rest;
@@ -78,6 +85,8 @@ type Page = {
   hy: any;
   /** The late module arrives. */
   land: () => void;
+  /** The next load of the late module fails when the returned function is called. */
+  failNextLoad: () => () => void;
   /** Starts hydration (once). */
   start: () => void;
   hydrated: () => boolean;
@@ -87,12 +96,24 @@ async function withPage(shape: Shape, body: (page: Page) => Promise<void>, expec
   const hy = bootstrapHydrationGlobal();
   delete (globalThis as any).$R;
   // Every module the client is asked to load is the late one, held at `land`.
+  // A failed load leaves no entry, as `loadModuleAssets` leaves none.
   let land!: () => void;
   const landed = new Promise<void>(r => (land = r));
+  let failNext = false;
+  let fail = () => {};
   hy.modules = {};
   hy.loading = new Proxy({} as Record<string, Promise<void>>, {
-    get: (loading, key: string) =>
-      (loading[key] ??= landed.then(() => void (hy.modules[key] = { default: Late })))
+    get: (loading, key: string) => {
+      if (!loading[key] && failNext) {
+        failNext = false;
+        const failed = new Promise<void>(
+          (_, reject) => (fail = () => reject(new Error("offline")))
+        );
+        failed.catch(() => delete loading[key]);
+        return (loading[key] = failed);
+      }
+      return (loading[key] ??= landed.then(() => void (hy.modules[key] = { default: Late })));
+    }
   });
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -107,6 +128,7 @@ async function withPage(shape: Shape, body: (page: Page) => Promise<void>, expec
       app,
       hy,
       land,
+      failNextLoad: () => ((failNext = true), () => fail()),
       start: () => (dispose ??= hydrate(() => <app.App />, container)),
       hydrated: () => !!dispose
     });
@@ -281,8 +303,89 @@ describe("a boundary that cannot claim yet holds its place", () => {
     })
   );
 
+  everyStart("beside", startAt =>
+    withPage("beside", async page => {
+      await replay(page, "beside", startAt, 0, page.app.flag);
+      // The sibling is in, and the boundary's server markup did not move.
+      const a = page.container.querySelector("#a") as any;
+      expect(page.main().innerHTML.replace(/<!--.*?-->| _hk="[^"]*"/g, "")).toBe(
+        '<u>s</u><b id="a">a:0</b><em>e</em>'
+      );
+      expect(a.$server).toBe(true);
+      page.land();
+      await settle();
+      expect(page.container.querySelector("#a")).toBe(a);
+      expect(page.main().textContent).toBe("sa:0e");
+      a.click();
+      flush();
+      expect(a.textContent).toBe("a:1");
+      expect(page.hy.done).toBe(true);
+    })
+  );
+
+  everyStart("between", startAt =>
+    withPage("between", async page => {
+      await replay(page, "between", startAt);
+      // c has resumed; a and b still wait on the module.
+      expect(page.main().textContent).toBe("a:0~b:0b2:0c:0");
+      page.land();
+      await settle();
+      expect(page.main().textContent).toBe("a:0~b:0b2:0c:0");
+      expect([...page.main().querySelectorAll("b")].every(b => (b as any).$server)).toBe(true);
+      expect(page.hy.done).toBe(true);
+    })
+  );
+
+  test("root: what else the container holds stays when the boundary resumes", () =>
+    withPage("root", async page => {
+      const { shell } = recording("root");
+      for (const run of steps(page.container, shell, true)) run();
+      // what a stream leaves in the container beside the app's markup
+      page.container.insertAdjacentHTML(
+        "beforeend",
+        '<link rel="stylesheet" href="data:text/css,"><script type="text/plain">x</script>'
+      );
+      page.start();
+      await settle();
+      page.land();
+      await settle();
+      expect(page.container.querySelector("link")).not.toBe(null);
+      expect(page.container.querySelector("script")).not.toBe(null);
+      const a = page.container.querySelector("#a") as any;
+      expect(a.$server).toBe(true);
+      a.click();
+      flush();
+      expect(a.textContent).toBe("a:1");
+      expect(page.hy.done).toBe(true);
+    }));
+
+  test("preload-retry: a load that failed before the fragment arrived leaves the swapped-in content", () =>
+    withPage(
+      "preload-retry",
+      async page => {
+        const { shell, chunks } = recording("preload-retry");
+        for (const run of steps(page.container, shell, true)) run();
+        const fail = page.failNextLoad();
+        page.start();
+        await settle();
+        fail();
+        await settle();
+        for (const chunk of chunks) {
+          for (const run of steps(page.container, chunk, false)) run();
+          await settle();
+        }
+        page.land();
+        await settle();
+        expect(page.main().textContent).toBe("a:0");
+        expect((page.container.querySelector("#a") as any).$server).toBe(true);
+        expect(page.hy.done).toBe(true);
+      },
+      /module preload failed/
+    ));
+
   for (const [shape, text] of [
     ["tails", "N1N0~N2~N4N3"],
+    ["same-tail", "N0N1N2N4N3~~"],
     ["under-held", "N3N0N1N2~N4"],
     ["under-held-collapsed", "N3N0~N1N2N4N5N6~"]
   ] as const)

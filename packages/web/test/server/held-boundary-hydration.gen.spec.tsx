@@ -8,7 +8,9 @@ import { expect, test } from "vitest";
 import { createHeldApp, manifest, SHAPES } from "../harness/held-boundary-hydration.jsx";
 import { recordStream, writeArtifact } from "./artifact-recorder.js";
 
-const LAZY = ["nested", "hide", "reorder", "cut"];
+const LAZY = ["nested", "hide", "reorder", "cut", "beside", "between", "root", "preload-retry"];
+// settled in the shell: nothing streams
+const SHELL = ["reorder", "beside", "root"];
 
 for (const shape of SHAPES) {
   test(`render held-boundary-hydration (${shape}) chunks`, async () => {
@@ -17,8 +19,7 @@ for (const shape of SHAPES) {
     const { shell, chunks, rest } = await recordStream(() => <App />, { manifest });
     // a boundary with lazy content names the module's client entry
     expect((shell + rest).includes('_assets"]=')).toBe(LAZY.includes(shape));
-    // `reorder` settles in the shell; every other shape streams
-    expect(chunks.length > 0).toBe(shape !== "reorder");
+    expect(chunks.length > 0).toBe(!SHELL.includes(shape));
     writeArtifact(`held-boundary-hydration-${shape}`, { shell, chunks });
   });
 }

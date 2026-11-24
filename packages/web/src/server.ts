@@ -3034,6 +3034,9 @@ export function renderToStream(code, options = {}) {
   // Patches waiting on a fragment that has not settled yet (a collapsed
   // slot's fallback inside a pending boundary), keyed by that fragment.
   const waitingOn = new Map();
+  // Fragments that settled into the shell or into an enclosing fragment's
+  // content: they have no placeholder left to patch a fallback into.
+  const inlined = new Set();
   // Before the shell is out nothing can be written after it: patches wait.
   let beforeShell = null;
   // What a patch for `key` has to go out after, if anything: the closest
@@ -3080,7 +3083,7 @@ export function renderToStream(code, options = {}) {
   const commitNative = entry => {
     // A fallback patch held for the shell whose slot settled in the
     // meantime: its content was inlined, there is no fallback to show.
-    if (entry.slot && !firstFlushed && !registry.has(entry.slot)) return;
+    if (entry.slot && inlined.has(entry.slot)) return;
     if (entry.key) unwritten.delete(entry.key);
     writeNative(entry.tpl);
     if (entry.task) emitTask(`$df("${entry.key}")`);
@@ -3090,6 +3093,7 @@ export function renderToStream(code, options = {}) {
   // The patches waiting on pending fragment `key` wait on `to` instead: the
   // fragment its content was spliced into, or (no `to`) the shell.
   const rehome = (key, to) => {
+    inlined.add(key);
     const waiting = waitingOn.get(key);
     if (!waiting) return;
     waitingOn.delete(key);

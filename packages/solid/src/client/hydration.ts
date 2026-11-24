@@ -155,7 +155,7 @@ type SharedConfig = {
   boundaryScopes?: Map<string, { registry?: Map<string, object>; gather?: (key: string) => void }>;
   captureBoundaryScope?: (id: string) => void;
   cleanupFragment?: (id: string) => void;
-  holdPlace?: (swapped?: any) => any;
+  holdPlace?: (id: string, swapped?: any) => any;
   fragmentRange?: (id: string) => [lead: any, end: any, parked: boolean] | undefined;
   loadModuleAssets?: (mapping: Record<string, string>) => Promise<void> | undefined;
   registry?: Map<string, object>;
@@ -2939,17 +2939,13 @@ function hydratedCreateLoadingBoundary<T, U>(
   let settledSerializationResumeQueued = false;
   // While the content waits to claim server DOM the boundary shows that
   // DOM as it is: the nodes its fragment's swap inserted (`_$HY.v`), or a
-  // node that stands for it, which the slot keeps among the nodes it
-  // tracks. A render that puts that node in the document has taken the
-  // server's out, and the content then renders fresh.
-  let held: any;
-  const hold = (id: string) => (held = sharedConfig.holdPlace?.((globalThis as any)._$HY.v?.[id]));
+  // node that stands for it, which the slot resolves to the server nodes
+  // the boundary's keys name.
+  const hold = (id: string) => sharedConfig.holdPlace?.(id, (globalThis as any)._$HY.v?.[id]);
   // A fallback still in the document sits in its placeholder's range, and the
   // boundary shows the whole range: a reorder moves it, a removal takes it.
   const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>
     range ? [range[0], range[2] ? undefined : fallback(), range[1]] : fallback();
-  const claim = (resume: (shouldHydrate?: boolean | 0) => void) => (shouldHydrate?: boolean | 0) =>
-    resume(shouldHydrate !== 0 && held && held.isConnected ? false : shouldHydrate);
 
   return coreMemo(() => {
     const o = getOwner()!;
@@ -2976,7 +2972,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         if (assetPromise) {
           settledSerializationResumeQueued = true;
           const [, resume] = initBoundaryResume(o, id);
-          scheduleResumeAfterAssets(id, claim(resume), assetPromise);
+          scheduleResumeAfterAssets(id, resume, assetPromise);
           return hold(id);
         }
         // Already settled: the server rendered content and it is in the DOM.
@@ -3056,8 +3052,7 @@ function hydratedCreateLoadingBoundary<T, U>(
       }
 
       settledSerializationResumeQueued = true;
-      const [, resumeBoundary] = initBoundaryResume(o, id);
-      const resume = claim(resumeBoundary);
+      const [, resume] = initBoundaryResume(o, id);
       // Observe: the clock for a recovery record, read only when someone
       // will hear it (a listener on "recovery"). Prod: a dead constant.
       const registeredAt =
@@ -3106,13 +3101,17 @@ function hydratedCreateLoadingBoundary<T, U>(
       const hy = (globalThis as any)._$HY;
       // Revealed ahead of its `_fr` settlement (two scripts on the wire; an
       // async entry can run between them, #4074): the fallback is gone and
-      // the content is in the DOM, so render nothing until the resume
+      // the content is in the DOM, so hold its place until the resume
       // adopts it.
       const revealed = hy.v?.[id];
+      // Set once the boundary has resumed at its swap and registered again:
+      // the settlement is that registration's to answer.
+      let resumed = false;
       waitAndResume(
         fr,
         shouldHydrate =>
-          shouldHydrate
+          resumed ||
+          (shouldHydrate
             ? whenRevealed(id, () => resume(true))
             : // Rendered fresh. A rejected fragment swapped in over the
               // claimed fallback left its nodes — the server's outcome for
@@ -3122,7 +3121,7 @@ function hydratedCreateLoadingBoundary<T, U>(
               (revealed || hy.v?.[id]?.forEach?.((n: ChildNode) => n.remove()),
               IS_OBSERVE
                 ? recover(id, registeredAt, () => resume(shouldHydrate))
-                : resume(shouldHydrate)),
+                : resume(shouldHydrate))),
         assetPromise,
         // A rejection (the server's, or the stream cut short) resumes with 0:
         // the fresh render adopts what the server sent (resumeBoundaryHydration).
@@ -3137,6 +3136,7 @@ function hydratedCreateLoadingBoundary<T, U>(
       // not catch must not stop the runtime, and is thrown from a microtask.)
       const again = () => {
         off();
+        resumed = true;
         settledSerializationResumeQueued = false;
         try {
           resume(true);
@@ -3162,7 +3162,7 @@ function hydratedCreateLoadingBoundary<T, U>(
     if (assetPromise && !sharedConfig.has!(id)) {
       const [, resume] = initBoundaryResume(o, id);
       assetPromise.then(
-        () => claim(resume)(),
+        () => resume(),
         err => {
           reportAssetFailure(err);
           resume(false);
