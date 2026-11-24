@@ -15,6 +15,11 @@
  * - `collapsed`: the fallback the inline runtime shows for the next slot of
  *   a collapsed `<Reveal>` is hydrated;
  * - `tail`: text after the boundary in the same slot keeps its own node;
+ * - `tails`: several boundaries wait in one slot with text between them, and
+ *   each still claims its server markup;
+ * - `under-held`, `under-held-collapsed`: a fragment, or a collapsed slot's
+ *   fallback, that lands inside content its enclosing boundary has not
+ *   claimed yet waits for its own boundary, and is claimed with the rest;
  * - `throws`: an error in the resume the inline runtime starts does not stop
  *   the runtime;
  * - `cut`: a stream cut before the fragment renders the content fresh, its
@@ -275,6 +280,22 @@ describe("a boundary that cannot claim yet holds its place", () => {
       expect(page.hy.done).toBe(true);
     })
   );
+
+  for (const [shape, text] of [
+    ["tails", "N1N0~N2~N4N3"],
+    ["under-held", "N3N0N1N2~N4"],
+    ["under-held-collapsed", "N3N0~N1N2N4N5N6~"]
+  ] as const)
+    everyStart(shape, startAt =>
+      withPage(shape, async page => {
+        await replay(page, shape, startAt);
+        expect(page.main().textContent).toBe(text);
+        expect([...page.main().querySelectorAll("b")].every(b => (b as any).$server)).toBe(true);
+        expect(page.container.querySelectorAll("main i").length).toBe(0);
+        expect(scaffolding(page.main())).toBe(0);
+        expect(page.hy.done).toBe(true);
+      })
+    );
 
   test("throws: an error in a resume the inline runtime starts does not stop the runtime", () =>
     withPage(

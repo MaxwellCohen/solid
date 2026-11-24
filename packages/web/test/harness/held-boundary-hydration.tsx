@@ -5,7 +5,9 @@
  * not loaded, or the fragment has not arrived — while the page around them
  * moves on: an enclosing boundary resumes, a list reorders, a `<Show>` hides
  * the boundary, a collapsed `<Reveal>` shows the next fallback (which may
- * fail to hydrate), text follows the boundary in its slot, the stream is cut.
+ * fail to hydrate), text follows the boundary in its slot, a nested fragment
+ * or a nested collapsed fallback lands inside content a boundary has not
+ * claimed yet, the stream is cut.
  *
  * Compiled with both generates: test/server/held-boundary-hydration.gen.spec.tsx
  * writes the chunks test/hydration/held-boundary-hydration.spec.tsx replays.
@@ -22,6 +24,9 @@ export const SHAPES = [
   "pending-text",
   "collapsed",
   "tail",
+  "tails",
+  "under-held",
+  "under-held-collapsed",
   "throws",
   "cut"
 ] as const;
@@ -44,6 +49,20 @@ function Item(props: { name: string }) {
     <b id={props.name} onClick={() => setN(n() + 1)}>
       {props.name}:{n()}
     </b>
+  );
+}
+
+/** A boundary whose own read settles after `ms`; its children are boundaries inside it. */
+function Part(props: { name: string; ms: number; children?: any }) {
+  const Read = () => {
+    const value = createMemo(() => sleep(props.ms).then(() => props.name.toUpperCase()));
+    return <b>{value()}</b>;
+  };
+  return (
+    <Loading fallback={<i>{props.name}</i>}>
+      <Read />
+      {props.children}
+    </Loading>
   );
 }
 
@@ -120,6 +139,57 @@ export function createHeldApp(shape: Shape) {
           </Loading>
           {"tail"}
         </>
+      ) : shape === "tails" ? (
+        // n2 and n4 are released in one batch: two boundaries wait in the
+        // slot, each followed by text.
+        <Reveal>
+          <Part name="n1" ms={0}>
+            <Part name="n0" ms={30} />
+          </Part>
+          {"~"}
+          <Part name="n2" ms={20} />
+          {"~"}
+          <Part name="n4" ms={5}>
+            <Part name="n3" ms={0} />
+          </Part>
+        </Reveal>
+      ) : shape === "under-held" ? (
+        // n3 and n4 are released together; n1's fragment follows n3's in the
+        // same chunk, ahead of the settlement n3 claims at.
+        <Reveal order="together">
+          <Part name="n3" ms={5}>
+            <Reveal order="natural">
+              <Part name="n0" ms={0} />
+              <Part name="n1" ms={5} />
+              <Part name="n2" ms={20} />
+            </Reveal>
+          </Part>
+          {"~"}
+          <Part name="n4" ms={0} />
+        </Reveal>
+      ) : shape === "under-held-collapsed" ? (
+        // The collapsed group inside n3 reaches n2 before n3's content is in
+        // the document: n2's fallback is shown when that content lands.
+        <Reveal order="together">
+          <Part name="n3" ms={15}>
+            <Reveal collapsed>
+              <Part name="n0" ms={0} />
+              {"~"}
+              <Part name="n1" ms={0} />
+              <Part name="n2" ms={20} />
+            </Reveal>
+          </Part>
+          <Reveal collapsed>
+            <Reveal collapsed>
+              <Part name="n4" ms={10} />
+              <Part name="n5" ms={0} />
+            </Reveal>
+            <Reveal order="natural">
+              <Part name="n6" ms={10} />
+              {"~"}
+            </Reveal>
+          </Reveal>
+        </Reveal>
       ) : shape === "throws" ? (
         <Reveal collapsed>
           <Loading fallback={<i>wait a</i>}>

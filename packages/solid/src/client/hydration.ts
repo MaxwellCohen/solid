@@ -155,7 +155,7 @@ type SharedConfig = {
   boundaryScopes?: Map<string, { registry?: Map<string, object>; gather?: (key: string) => void }>;
   captureBoundaryScope?: (id: string) => void;
   cleanupFragment?: (id: string) => void;
-  holdPlace?: () => any;
+  holdPlace?: (swapped?: any) => any;
   fragmentRange?: (id: string) => [lead: any, end: any, parked: boolean] | undefined;
   loadModuleAssets?: (mapping: Record<string, string>) => Promise<void> | undefined;
   registry?: Map<string, object>;
@@ -2495,7 +2495,7 @@ function initBoundaryResume(
 //
 // The streaming layer's inline script owns only the parse-time swap
 // MECHANICS ($dfr: replace the `pl-*` range with the template payload, then
-// record the reveal as `_$HY.v[id] = 1`); this module owns the reveal
+// record the reveal in `_$HY.v[id]`); this module owns the reveal
 // POLICY, and it answers every "what may the document still deliver?"
 // question from records rather than DOM scans. The ledger's states:
 //
@@ -2937,12 +2937,13 @@ function hydratedCreateLoadingBoundary<T, U>(
   if (!sharedConfig.hydrating || noHydrationId()) return coreLoadingBoundary(fn, fallback, options);
 
   let settledSerializationResumeQueued = false;
-  // While the content waits to claim server DOM the boundary shows `held`, a
-  // node that stands for it: the slot keeps the server nodes it tracks. A
-  // render that puts `held` in the document has taken those nodes out, and
-  // the content then renders fresh.
+  // While the content waits to claim server DOM the boundary shows that
+  // DOM as it is: the nodes its fragment's swap inserted (`_$HY.v`), or a
+  // node that stands for it, which the slot keeps among the nodes it
+  // tracks. A render that puts that node in the document has taken the
+  // server's out, and the content then renders fresh.
   let held: any;
-  const hold = () => (held = sharedConfig.holdPlace?.());
+  const hold = (id: string) => (held = sharedConfig.holdPlace?.((globalThis as any)._$HY.v?.[id]));
   // A fallback still in the document sits in its placeholder's range, and the
   // boundary shows the whole range: a reorder moves it, a removal takes it.
   const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>
@@ -2976,7 +2977,7 @@ function hydratedCreateLoadingBoundary<T, U>(
           settledSerializationResumeQueued = true;
           const [, resume] = initBoundaryResume(o, id);
           scheduleResumeAfterAssets(id, claim(resume), assetPromise);
-          return hold();
+          return hold(id);
         }
         // Already settled: the server rendered content and it is in the DOM.
         // Hydrate straight through — the fallback only hydrates when it is
@@ -3091,7 +3092,7 @@ function hydratedCreateLoadingBoundary<T, U>(
           return undefined;
         }
         scheduleResumeAfterAssets(id, resume, assetPromise);
-        return hold();
+        return hold(id);
       }
 
       // The fragment is still streaming, and global hydration may already
@@ -3128,7 +3129,7 @@ function hydratedCreateLoadingBoundary<T, U>(
         0,
         fragmentAbort(id)
       );
-      if (revealed) return hold();
+      if (revealed) return hold(id);
       // The swap takes the range this boundary shows out of the document, so
       // the boundary resumes at the swap, not at the settlement the wire
       // delivers after it: unsettled, the resume holds the content's place.
@@ -3167,7 +3168,7 @@ function hydratedCreateLoadingBoundary<T, U>(
           resume(false);
         }
       );
-      return hold();
+      return hold(id);
     }
     return coreLoadingBoundary(fn, fallback, options);
   }) as unknown as Accessor<T | U>;

@@ -2640,7 +2640,17 @@ export function hydrate(code, element, options = {}) {
       node.replaceWith((node = document.createComment("?" + node.target)));
     return node;
   };
-  sharedConfig.holdPlace = () => {
+  // What a boundary shows while its content waits to claim server DOM: the
+  // nodes its fragment's swap inserted, when the list will stay what the
+  // document has (a nested pending range would be swapped under it, and a
+  // rejected fragment's nodes are the outcome an `<Errored>` claims). A
+  // comment that stands for the DOM otherwise (`_$h`, see insertExpression).
+  sharedConfig.holdPlace = swapped => {
+    if (swapped && swapped.e === false) {
+      // (Claims drop the text separators: they are no part of the list.)
+      const nodes = swapped.filter(n => n.nodeType !== 8 || n.nodeValue !== "!$");
+      if (nodes.every(n => n.isConnected && !/^pl-/.test(n.id))) return nodes;
+    }
     const node = document.createComment("");
     node._$h = 1;
     return node;
