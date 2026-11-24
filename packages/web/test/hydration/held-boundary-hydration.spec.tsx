@@ -29,6 +29,8 @@
  * - `root`: at the hydration root, what else the container holds stays;
  * - `preload-retry`: a module load that fails before the fragment arrives
  *   does not take the swapped-in content out;
+ * - `fresh-over-span`: a boundary that renders fresh, because its module
+ *   failed to load, releases its span list and the ones under it;
  * - `under-held`, `under-held-collapsed`: a fragment, or a collapsed slot's
  *   fallback, that lands inside content its enclosing boundary has not
  *   claimed yet waits for its own boundary, and is claimed with the rest;
@@ -444,6 +446,32 @@ describe("a boundary that cannot claim yet holds its place", () => {
         expect(page.main().textContent).toBe("a:0");
         expect((page.container.querySelector("#a") as any).$server).toBe(true);
         expect(page.hy.done).toBe(true);
+      },
+      /module preload failed/
+    ));
+
+  // The module fails to load: the outer boundary renders fresh over its own
+  // span and the inner boundary's, and neither list keeps the server nodes.
+  test("fresh-over-span: a fresh render releases the span lists under it", () =>
+    withPage(
+      "fresh-over-span",
+      async page => {
+        const { shell } = recording("fresh-over-span");
+        const [markup, ...scripts] = steps(page.container, shell, true);
+        markup();
+        const served = page.container.querySelector("#b")!;
+        for (const run of scripts) run();
+        const fail = page.failNextLoad();
+        page.start();
+        await settle();
+        expect(Object.keys(page.hy.hs ?? {}).length).toBe(2);
+        fail();
+        await settle();
+        page.land();
+        await settle();
+        expect(page.main().textContent).toBe("a:0b:0");
+        expect(served.isConnected).toBe(false);
+        expect(Object.keys(page.hy.hs ?? {})).toEqual([]);
       },
       /module preload failed/
     ));

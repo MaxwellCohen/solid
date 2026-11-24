@@ -19,10 +19,11 @@ const LAZY = [
   "no-hydration",
   "between",
   "root",
-  "preload-retry"
+  "preload-retry",
+  "fresh-over-span"
 ];
 // settled in the shell: nothing streams
-const SHELL = ["reorder", "reorder-claimed", "beside", "no-hydration", "root"];
+const SHELL = ["reorder", "reorder-claimed", "beside", "no-hydration", "root", "fresh-over-span"];
 
 for (const shape of SHAPES) {
   test(`render held-boundary-hydration (${shape}) chunks`, async () => {
