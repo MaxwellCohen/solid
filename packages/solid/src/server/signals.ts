@@ -4198,9 +4198,8 @@ function record(
 // the `<?end>` that balances it, or -1. A marker counts only where the parser
 // reads one: an attribute value, a comment and the text of a raw-text
 // element can hold the same characters.
-// (The same scan as rangeClose in @solidjs/web's server.)
 const TAG = /<([a-zA-Z][^\s/>]*)(?:[^>"']|"[^"]*"|'[^']*')*>/y;
-function rangeClose(html: string, at: number): number {
+export function rangeClose(html: string, at: number): number {
   for (let depth = 0, i = at, m; (i = html.indexOf("<", i)) !== -1; ) {
     if (html.startsWith("<?end>", i)) {
       if (!depth--) return i;

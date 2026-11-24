@@ -448,14 +448,7 @@ function drainHydrationCallbacks() {
   if (cbs) for (const cb of cbs) cb();
   setTimeout(() => {
     if (IS_DEV && sharedConfig.verifyHydration) sharedConfig.verifyHydration();
-    const hy = (globalThis as any)._$HY;
-    if (hy) {
-      hy.done = true;
-      // Every boundary has claimed: the node lists keep nodes alive that the
-      // page may since have dropped.
-      for (const id in hy.v) hy.v[id] = 1;
-      hy.h = undefined;
-    }
+    if ((globalThis as any)._$HY) (globalThis as any)._$HY.done = true;
     sharedConfig.registry?.clear();
   });
 }
@@ -1554,8 +1547,6 @@ function lazyHydrationLookup<T>(
       );
     return () => component as T;
   }
-  // (Only a claim needs the module now: a boundary rendered fresh loads it
-  // through the import.)
   if (!comp && moduleUrl && isClaiming()) {
     // moduleUrl present means the bundler transform ran, so the server
     // must have registered this position. A miss is a broken preload — the
@@ -2944,19 +2935,22 @@ function hydratedCreateLoadingBoundary<T, U>(
   if (!sharedConfig.hydrating || noHydrationId()) return coreLoadingBoundary(fn, fallback, options);
 
   let settledSerializationResumeQueued = false;
-  // While the content waits to claim server DOM the boundary shows that
-  // DOM as it is: the nodes its fragment's swap inserted (`_$HY.v`), or a
-  // node that stands for it, which the slot resolves to the server nodes
-  // the boundary's keys name.
   const hold = (id: string) => sharedConfig.holdPlace?.(id, (globalThis as any)._$HY.v?.[id]);
-  // A fallback still in the document sits in its placeholder's range, and the
-  // boundary shows the whole range: a reorder moves it, a removal takes it.
+  // The whole range, so a reorder moves it and a removal takes it.
   const ranged = (id: string, range = sharedConfig.fragmentRange?.(id)) =>
     range ? [range[0], range[2] ? undefined : fallback(), range[1]] : fallback();
 
   return coreMemo(() => {
     const o = getOwner()!;
     const id = o.id!;
+    // A list keeps its nodes alive: it goes with the boundary.
+    onCleanup(() => {
+      const hy = (globalThis as any)._$HY;
+      if (isDisposed(o) && hy) {
+        if (hy.v?.[id]) hy.v[id] = 1;
+        if (hy.h) delete hy.h[id];
+      }
+    });
 
     const assetPromise = sharedConfig.hydrating ? boundaryAssets(id) : undefined;
 

@@ -220,8 +220,6 @@ describe("a boundary that cannot claim yet holds its place", () => {
       flush();
       expect(a.textContent).toBe("a:1");
       expect(page.hy.done).toBe(true);
-      // The swap's node list is let go once every boundary has claimed.
-      expect(Object.values(page.hy.v)).toEqual([1]);
     })
   );
 
@@ -231,6 +229,8 @@ describe("a boundary that cannot claim yet holds its place", () => {
       await replay(page, "hide", startAt, 1, page.app.hide);
       expect(page.main().textContent).toBe("z:0");
       expect(scaffolding(page.main())).toBe(0);
+      // The hidden boundary's node list goes with it.
+      expect(Object.values(page.hy.v ?? {}).filter((l: any) => l.splice)).toEqual([]);
       page.land();
       await settle();
       expect(page.main().textContent).toBe("z:0");

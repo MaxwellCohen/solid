@@ -95,6 +95,12 @@ export const inServerComponentScope: () => boolean = core.inServerComponentScope
 export const inLiveServerComponentScope: () => boolean = core.inLiveServerComponentScope;
 
 /**
+ * Server: where the patching range whose content starts at `at` in `html`
+ * closes — the index of the `<?end>` that balances it, or -1. Client: -1.
+ */
+export const rangeClose: (html: string, at: number) => number = core.rangeClose;
+
+/**
  * Server: the value the client may see in place of a render failure about to
  * be serialized or rendered for it — the value itself in the dev build or
  * when branded with `markSafeError`, else one generic `Error` per original

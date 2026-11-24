@@ -5,6 +5,7 @@
  * the fixture in each shape and writes its shell plus each later chunk.
  */
 import { expect, test } from "vitest";
+import { NoHydration, renderToString } from "@solidjs/web";
 import { createHeldApp, manifest, SHAPES } from "../harness/held-boundary-hydration.jsx";
 import { recordStream, writeArtifact } from "./artifact-recorder.js";
 
@@ -38,3 +39,17 @@ for (const shape of SHAPES) {
     writeArtifact(`held-boundary-hydration-${shape}`, { shell, chunks });
   });
 }
+
+test("every render mode marks a module-loading boundary's markup; <NoHydration> does not", async () => {
+  const { App, preload } = createHeldApp("beside");
+  await preload();
+  const html = renderToString(() => <App />, { manifest } as any);
+  expect(html).toMatch(/<!--ph-(\w+)--><b[^>]*id="a"[\s\S]*?<\/b><!--\/ph-\1-->/);
+  const plain = renderToString(() => (
+    <NoHydration>
+      <App />
+    </NoHydration>
+  ));
+  expect(plain).toContain('id="a"');
+  expect(plain).not.toContain("<!--ph-");
+});

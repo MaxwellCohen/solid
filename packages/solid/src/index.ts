@@ -221,6 +221,10 @@ export function inServerComponentScope(): boolean {
 export function inLiveServerComponentScope(): boolean {
   return false;
 }
+/** @internal — server-only: the client writes no streamed HTML. */
+export function rangeClose(_html: string, _at: number): number {
+  return -1;
+}
 /** @internal — server-only: the client has no wire to sanitize for. */
 export function ssrSanitizeError(value: unknown): unknown {
   return value;

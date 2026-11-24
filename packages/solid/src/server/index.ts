@@ -169,7 +169,8 @@ export {
   getProjectionTrace,
   shareAsyncIterable,
   ssrSanitizeError,
-  reportServerError
+  reportServerError,
+  rangeClose
 } from "./signals.js";
 export type { ServerErrorSite, ServerErrorHook } from "./signals.js";
 /** @internal Dependency edges (the frames server installs them). */

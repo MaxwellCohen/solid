@@ -28,7 +28,8 @@ import {
   ssrScope as scope,
   ssrSanitizeError,
   reportServerError,
-  beginEdgesRender
+  beginEdgesRender,
+  rangeClose
 } from "solid-js/internal";
 import type { Owner } from "solid-js";
 import type { ServerErrorSite } from "solid-js/internal";
@@ -6531,32 +6532,6 @@ function replacePlaceholder(html, key, value) {
   }
   const close = `<!--pl-${key}-->`;
   return html.slice(0, first) + value + html.slice(html.indexOf(close, at) + close.length);
-}
-
-// Where the patching range whose content starts at `at` closes: the index of
-// the `<?end>` that balances it, or -1. A marker counts only where the parser
-// reads one: an attribute value, a comment and the text of a raw-text
-// element can hold the same characters.
-// (The same scan as rangeClose in solid-js's server.)
-const TAG = /<([a-zA-Z][^\s/>]*)(?:[^>"']|"[^"]*"|'[^']*')*>/y;
-function rangeClose(html, at) {
-  for (let depth = 0, i = at, m; (i = html.indexOf("<", i)) !== -1; ) {
-    if (html.startsWith("<?end>", i)) {
-      if (!depth--) return i;
-      i += 6;
-    } else if (html.startsWith("<?start ", i)) {
-      depth++;
-      i += 8;
-    } else if (html.startsWith("<!--", i)) {
-      i = html.indexOf("-->", i + 4);
-      if (i === -1) return -1;
-    } else if (((TAG.lastIndex = i), (m = TAG.exec(html)))) {
-      i = TAG.lastIndex;
-      if (/^(script|style|textarea|title|xmp|iframe|noembed|noframes)$/i.test(m[1]))
-        i = Math.max(i, html.indexOf("</" + m[1], i));
-    } else i++;
-  }
-  return -1;
 }
 
 function classListToObject(classList) {

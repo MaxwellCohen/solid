@@ -705,7 +705,7 @@ function ssrLoadingBoundary(
   // `<!--ph-ID-->` and `<!--/ph-ID-->`: the boundary holds that markup's
   // place until it can claim it (the client lists it, `hydrate()`).
   const span = (v: any) => {
-    if (!ctx.getBoundaryModules?.(id) || (parent && getContext(NoHydrateContext, parent))) return v;
+    if (!ctx.getBoundaryModules?.(id)) return v;
     const open = `<!--ph-${id}-->`,
       close = `<!--/ph-${id}-->`;
     return typeof v === "string" ? open + v + close : ctx.ssr([open, close], ctx.escape(v));

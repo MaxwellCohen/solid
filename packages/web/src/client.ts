@@ -2632,26 +2632,19 @@ export function hydrate(code, element, options = {}) {
       if (m.startsWith("?start")) depth++;
     }
   };
-  // A boundary that cannot claim yet shows the server markup it spans
-  // (`_$HY.h`), or its fragment's swap inserted (for a rejected fragment,
-  // the outcome an `<Errored>` drew): the list itself, which the runtime
-  // keeps current through later swaps (`$dfz`), so a render of the slot
-  // reads what the document has then.
+  // The list itself: the runtime keeps it current through later swaps
+  // (`$dfz`). Claims drop the text separators.
   sharedConfig.holdPlace = (id, swapped) => {
     const hy = globalThis._$HY,
       nodes = (hy.h && hy.h[id]) || (swapped && swapped.splice && swapped);
-    // (Claims drop the text separators: they are no part of the list.)
     if (nodes)
       for (let i = nodes.length, n; i--; )
         ((n = nodes[i]).isConnected && n.nodeValue !== "!$") || nodes.splice(i, 1);
     return nodes;
   };
-  // The server marks the markup of such a boundary with `<!--ph-ID-->` and
-  // `<!--/ph-ID-->`: it is listed and the markers go before anything claims,
-  // so positions are the server's — in the document now, and in what each
-  // swap inserts before the swap is announced. An element with no key is
-  // markup the client never claims (`<NoHydration>`): it stays untracked, as
-  // it would without a wait.
+  // The markers come out before anything claims, so positions are the
+  // server's. An element with no key is never claimed (`<NoHydration>`): it
+  // stays untracked, as it would without a wait.
   const spans = roots => {
     const open = {},
       done = [],
@@ -2673,13 +2666,16 @@ export function hydrate(code, element, options = {}) {
       else for (let w = document.createTreeWalker(r, 128), n; (n = w.nextNode()); ) visit(n);
     done.forEach(n => n.remove());
   };
-  spans([document]);
-  const fe = hy.fe;
-  hy.fe = (id, parent) => {
-    const swapped = hy.v && hy.v[id];
-    swapped && swapped.splice && spans(swapped);
-    fe && fe(id, parent);
-  };
+  spans([element]);
+  // A swap's spans are listed before the swap is announced.
+  if (!(hy.fe && hy.fe._$s)) {
+    const fe = hy.fe;
+    (hy.fe = (id, parent) => {
+      const swapped = hy.v && hy.v[id];
+      swapped && swapped.splice && spans(swapped);
+      fe && fe(id, parent);
+    })._$s = 1;
+  }
   sharedConfig.fragmentRange = id => {
     const tpl = document.getElementById("pl-" + id);
     if (tpl) {
